@@ -30,6 +30,12 @@ flowchart TD
 
 详细顺序、失败处理和成功标准见 [流程说明](docs/architecture.md)。
 
+## Codex skill
+
+可复用技能在 [skills/motionpro-vpn-access](skills/motionpro-vpn-access/SKILL.md)。将整个目录复制到当前 Codex 的 skills 目录，按 [环境说明](skills/motionpro-vpn-access/references/environment.md) 填写只保存在本机的 profile，然后用 `$motionpro-vpn-access` 调用。
+
+skill 包含只读预检、自动恢复阶段判断、OTP 同步说明、显式 KeepAlive 交接、共用人工预算、目标验证及自然验收。它使用已经安装的客户端与 Guard，不会因加载 skill 自动安装或启动另一套恢复系统。默认操作只读；人工接管依赖现有授权与实时电脑操作工具。
+
 ## 支持范围
 
 - macOS 14 或更新版本，Apple Silicon 或 Intel，已安装 Xcode Command Line Tools。

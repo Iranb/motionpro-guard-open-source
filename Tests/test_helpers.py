@@ -121,7 +121,13 @@ class ManualBudgetTests(unittest.TestCase):
 class PublicationTests(unittest.TestCase):
     def test_source_allowlist(self):
         self.assertTrue(release_audit.permitted(Path("Sources/Engine.swift")))
+        self.assertTrue(release_audit.permitted(Path("skills/motionpro-vpn-access/SKILL.md")))
+        self.assertTrue(release_audit.permitted(Path("skills/motionpro-vpn-access/agents/openai.yaml")))
         for path in ["signing/identity.json", "VSite.plist", "events/example.jsonl", "project.local.json", "dist/example.app"]:
+            self.assertFalse(release_audit.permitted(Path(path)))
+        for path in ["skills/motionpro-vpn-access/environment.local.json",
+                     "skills/motionpro-vpn-access/references/local-environment.md",
+                     "skills/motionpro-vpn-access/scripts/private.json"]:
             self.assertFalse(release_audit.permitted(Path(path)))
 
 

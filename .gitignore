@@ -28,3 +28,6 @@ offline-otp*
 *receipt.json
 *repair-result.json
 staged-launch-agents/
+environment.local.json
+**/references/local-environment.md
+agent-handover.json

@@ -1,0 +1,7 @@
+{
+  "support_directory": "MotionProGuardOSS",
+  "app_relative_path": "Applications/MotionPro Guard OSS.app",
+  "bundle_identifier": "org.motionproguard.app",
+  "main_job_label": "org.motionproguard.app",
+  "watchdog_job_label": "org.motionproguard.app.watchdog"
+}

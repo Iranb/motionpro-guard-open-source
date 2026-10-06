@@ -30,6 +30,14 @@ def permitted(relative):
     if relative.as_posix() in TOP:
         return True
     parts = relative.parts
+    if parts[:2] == ("skills", "motionpro-vpn-access"):
+        inside = parts[2:]
+        if inside in (("SKILL.md",), ("environment.example.json",), ("agents", "openai.yaml")):
+            return True
+        if len(inside) == 2 and inside[0] == "scripts" and relative.suffix == ".py":
+            return True
+        return (len(inside) == 2 and inside[0] == "references"
+                and inside[1] in {"environment.md", "automatic-flow.md", "manual-recovery.md", "evidence.md"})
     return len(parts) > 1 and parts[0] in FOLDERS and relative.suffix in FOLDERS[parts[0]]
 
 
@@ -41,7 +49,8 @@ def public_files():
     ignored = {"__pycache__", "dist", "artifacts", "signing", "releases", ".git"}
     return [p.relative_to(ROOT) for p in ROOT.rglob("*") if p.is_file()
             and not any(x in ignored for x in p.relative_to(ROOT).parts)
-            and p.name != "project.local.json" and p.suffix != ".pyc"]
+            and p.name not in {"project.local.json", "environment.local.json", "local-environment.md"}
+            and p.suffix != ".pyc"]
 
 
 def audit(files):

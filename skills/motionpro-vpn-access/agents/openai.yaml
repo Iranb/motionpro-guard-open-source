@@ -1,0 +1,4 @@
+interface:
+  display_name: "MotionPro VPN 自动恢复"
+  short_description: "只读诊断 MotionPro 与 Guard，限次接管恢复后继续 SSH 或 HPC 任务"
+  default_prompt: "使用 $motionpro-vpn-access 检查当前 VPN 与自动登录状态，在已有授权范围恢复连接，再验证目标并继续原任务。"

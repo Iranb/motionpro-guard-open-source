@@ -1,0 +1,7 @@
+{
+  "title": "MotionPro VPN backup check",
+  "interval_hours": 10,
+  "prompt_file": "automation/prompt.md",
+  "requires": ["local macOS execution", "authorized computer-use for fallback"],
+  "automatic_task_creation": false
+}

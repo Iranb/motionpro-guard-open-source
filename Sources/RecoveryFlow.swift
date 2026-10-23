@@ -28,7 +28,7 @@ enum RecoveryInterrupted: Error {
 /// OTP verification must finish before any client shutdown or profile write.
 @MainActor
 enum RecoveryFlow {
-    static func requireDisconnected(_ status: VendorStatus?) throws {
+    nonisolated static func requireDisconnected(_ status: VendorStatus?) throws {
         guard status?.mayLogin == true else { throw RecoveryInterrupted.tunnelState(status) }
     }
 
@@ -52,5 +52,22 @@ enum RecoveryFlow {
         try requireDisconnected(await status())
         try validate(proof)
         try await submit()
+    }
+}
+
+/// Evidence for a read-only comparison with the live official OTP window.
+/// Ignore samples crossing a period boundary; never count a mismatch as a match.
+struct OTPAlignmentProof {
+    private(set) var matchingSamples = 0
+    private(set) var mismatchingSamples = 0
+    private(set) var periods: Set<UInt64> = []
+    var verified: Bool { periods.count >= 2 && matchingSamples >= 4 && mismatchingSamples == 0 }
+    mutating func observe(matches: Bool, before: TimeInterval, after: TimeInterval, period: Int) {
+        guard period > 0, before.isFinite, after.isFinite, before >= 0, after >= before,
+              after - before <= 5, after < 253_402_300_799 else { return }
+        let first = floor(before / Double(period)), last = floor(after / Double(period))
+        guard first == last else { return }
+        if matches { matchingSamples += 1; periods.insert(UInt64(last)) }
+        else { mismatchingSamples += 1 }
     }
 }

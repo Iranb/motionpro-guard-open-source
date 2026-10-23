@@ -62,8 +62,8 @@ def job_definitions():
     return [dict(Label=LABEL, ProgramArguments=[str(binary)], RunAtLoad=True, KeepAlive=True,
         ThrottleInterval=30, ProcessType="Interactive", LimitLoadToSessionType="Aqua",
         StandardOutPath=str(logs / "guard.stdout.log"), StandardErrorPath=str(logs / "guard.stderr.log")),
-        dict(Label=LABEL + ".watchdog", ProgramArguments=[str(binary), "--watchdog"], RunAtLoad=True,
-        StartInterval=60, ProcessType="Background", LimitLoadToSessionType="Aqua",
+        dict(Label=LABEL + ".watchdog", ProgramArguments=[str(binary), "--watchdog"], RunAtLoad=False,
+        ProcessType="Background", LimitLoadToSessionType="Aqua",
         StandardOutPath="/dev/null", StandardErrorPath=str(logs / "watchdog.stderr.log"))]
 
 
@@ -110,7 +110,8 @@ def main():
             verify(APP)
             policy = SUPPORT / "recovery-policy.json"
             if not policy.exists():
-                value = dict(enabled=False, submissions=[], consecutiveFailures=0, successCount=0, manualHold=False)
+                value = dict(enabled=False, submissions=[], consecutiveFailures=0, successCount=0,
+                             manualHold=False, recoveryBackend="official_profile")
                 atomic_write(policy, json.dumps(value).encode())
             print("Installed with automatic recovery disabled. Complete local enrollment before enabling it.")
             return

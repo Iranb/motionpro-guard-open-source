@@ -37,6 +37,8 @@ struct GuardSnapshot: Codable {
     var otpProvider: String?
     var offlineOTPReady: Bool?
     var offlineOTPCheckState: String?
+    var officialOTPAlignmentState: String?
+    var officialOTPComparedAt: Date?
     var lockedOTPGenerationSamples: Int?
     var accessibilityReady = false
     var lastRecovery: Date?
@@ -66,6 +68,12 @@ struct GuardSnapshot: Codable {
     var manualControlUntil: Date?
     var confirmedRecoveryCount: Int?
     var reliabilityState: String?
+    var recoveryBackend: String?
+    var headlessPhase: String?
+    var headlessAcceptanceState: String?
+    var lastCLIRequestID: String?
+    var automaticCheckMode: String?
+    var lastSuccessfulLoginAt: Date?
     static var placeholder: Self { Self() }
     var otpAccessReady: Bool {
         if offlineOTPCheckState != nil && offlineOTPCheckState != "missing" { return offlineOTPReady == true }
@@ -151,6 +159,13 @@ struct RecoveryPolicy: Codable {
     var manualControlUntil: Date?
     var confirmedSuccessCount: Int?
     var lockedSuccessDates: [Date]?
+    // A durable reservation survives process death. Never grant a new budget
+    // merely because the HTTP result was lost or a new backend was installed.
+    var pendingHeadlessAttempt: String?
+    var pendingOfficialAttempt: String?
+    var recoveryBackend: String?
+    var lastSuccessfulLoginAt: Date?
+    var lastScheduledEvaluationAt: Date?
 
     static func loadOrHold(_ data: Data, now: Date = Date()) -> Self {
         if let saved = try? JSONDecoder().decode(Self.self, from: data),
@@ -174,12 +189,28 @@ struct RecoveryPolicy: Codable {
     }
     mutating func failed() { consecutiveFailures += 1; if consecutiveFailures >= 2 { manualHold = true } }
     mutating func succeeded(now: Date) {
-        consecutiveFailures = 0; lastSuccess = now; successCount += 1
+        consecutiveFailures = 0; lastSuccess = now; lastSuccessfulLoginAt = now; successCount += 1
     }
     mutating func confirmed(now: Date, locked: Bool) {
         succeeded(now: now)
         confirmedSuccessCount = (confirmedSuccessCount ?? 0) + 1
         if locked { lockedSuccessDates = Array(((lockedSuccessDates ?? []) + [now]).suffix(30)) }
+    }
+}
+
+/// One scheduled evaluation after the expected 24-hour session lifetime.
+/// A still-connected session advances to the next daily slot, without polling.
+enum LoginExpirySchedule {
+    static let mode = "login_expiry"
+    static let lifetime: TimeInterval = 24 * 3600
+    static let grace: TimeInterval = 120
+
+    static func next(lastLogin: Date?, evaluatedAt: Date?) -> Date? {
+        guard let lastLogin else { return nil }
+        let first = lastLogin.addingTimeInterval(lifetime + grace)
+        guard let evaluatedAt, evaluatedAt >= first else { return first }
+        let elapsedSlots = floor(evaluatedAt.timeIntervalSince(first) / lifetime) + 1
+        return first.addingTimeInterval(elapsedSlots * lifetime)
     }
 }
 

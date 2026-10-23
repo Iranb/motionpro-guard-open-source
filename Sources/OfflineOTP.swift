@@ -11,12 +11,15 @@ enum OfflineOTP {
     static let account = "offline-otp.v1"
 
     enum Failure: Error, LocalizedError {
-        case missing, invalid, binding, clockBoundary, clockSettling, clockChanged
+        case missing, invalid, binding, sourceUnverified, sourceChanged, officialMismatch, clockBoundary, clockSettling, clockChanged
         var errorDescription: String? {
             switch self {
             case .missing: return "尚未导入并验证后台 OTP 令牌"
             case .invalid: return "后台 OTP 令牌格式或验证记录无效"
             case .binding: return "后台 OTP 的账号或网关与当前配置不匹配"
+            case .sourceUnverified: return "后台令牌未绑定官方数据源；请重新与官方口令同步，尚未提交登录"
+            case .sourceChanged: return "官方令牌已变化或不可读取；请重新同步，尚未提交登录"
+            case .officialMismatch: return "后台 OTP 与官方窗口不一致；停止登录并等待重新同步"
             case .clockBoundary: return "等待下一轮口令；当前有效期不足或时钟调整范围跨越轮换边界"
             case .clockSettling: return "正在检查后台计算的时钟连续性"
             case .clockChanged: return "检测到系统时间变化；等待时钟稳定后重新计算"
@@ -30,9 +33,10 @@ enum OfflineOTP {
         let username: String
         let seed: Data
         let period: Int
-        let clockUncertainty: Double
+        var clockUncertainty: Double
         let verifiedAt: Date
         let verifiedPeriods: Int
+        var sourcePath: String? = nil
 
         func validate() throws {
             guard version == 1, host == GuardIdentity.host, !username.isEmpty,
@@ -48,6 +52,24 @@ enum OfflineOTP {
             try validate()
             guard credentials.host == host, credentials.username == username,
                   profileUsername == username else { throw Failure.binding }
+        }
+
+        /// Never reuse a verified copy after the official seed/period changes.
+        /// Revalidation requires the live reference; do not silently import a new seed.
+        @discardableResult func requireCurrentSource() throws -> Token {
+            guard let sourcePath else { throw Failure.sourceUnverified }
+            do {
+                let current = try OfflineOTP.candidate(data: OfflineOTP.sourceData(path: sourcePath), username: username)
+                guard matchesSource(current) else { throw Failure.sourceChanged }
+                return current
+            } catch { throw Failure.sourceChanged }
+        }
+
+        func matchesSource(_ current: Token) -> Bool {
+            // An offset refresh does not replace the enrolled seed. Its current
+            // validated uncertainty is applied to generation by load().
+            seed == current.seed && period == current.period && host == current.host &&
+                username == current.username
         }
 
         /// The vendor offset's sign is not a confirmed contract. Accept only a
@@ -106,12 +128,23 @@ enum OfflineOTP {
 
     static func load() throws -> Token {
         guard let bytes = try Vault.get(account) else { throw Failure.missing }
-        let token: Token
+        var token: Token
         do { token = try JSONDecoder().decode(Token.self, from: bytes); try token.validate() }
         catch { throw Failure.invalid }
         guard let credentials = try Vault.credentials() else { throw GuardFailure.invalidCredentials }
         try token.requireBinding(credentials: credentials, profileUsername: profileUsername())
+        token.clockUncertainty = try token.requireCurrentSource().clockUncertainty
         return token
+    }
+
+    static func sourceData(path: String) throws -> Data {
+        let url = URL(fileURLWithPath: path)
+        guard url.path == url.resolvingSymlinksInPath().path else { throw Failure.sourceChanged }
+        let attributes = try FileManager.default.attributesOfItem(atPath: path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+              (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
+              (attributes[.size] as? NSNumber)?.intValue ?? Int.max <= 1_048_576 else { throw Failure.sourceChanged }
+        return try Data(contentsOf: url, options: .uncached)
     }
 
     /// Import is an explicit one-time action. It never modifies or rebinds the

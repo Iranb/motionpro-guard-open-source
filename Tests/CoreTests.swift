@@ -196,20 +196,20 @@ import Security
         check(statsSnapshot.reconnectionCount(at: statsNow.addingTimeInterval(2)) == 1, "widget count expires at a future timeline entry")
         let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = .current; formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        let logDate = formatter.date(from: "2020-01-02 10:00:00")!
+        let logDate = formatter.date(from: "2026-09-15 10:00:00")!
         var parser = ConnectionLogParser()
-        let finish = "2020-01-02 10:00:00 MainWin::OnVpnConnected: vpn connected finish, start set display status."
-        let l3 = "2020-01-02 10:00:01 MainWin::OnVpnConnected: current tunnel type is L3VPN only"
-        check(parser.consume("2020-01-02 10:00:00 login successfully, method name: synthetic") == nil, "authentication alone is not a successful tunnel")
+        let finish = "2026-09-15 10:00:00 MainWin::OnVpnConnected: vpn connected finish, start set display status."
+        let l3 = "2026-09-15 10:00:01 MainWin::OnVpnConnected: current tunnel type is L3VPN only"
+        check(parser.consume("2026-09-15 10:00:00 login successfully, method name: synthetic") == nil, "authentication alone is not a successful tunnel")
         check(parser.consume(l3) == nil, "mode line without a connection callback is ignored")
         check(parser.consume(finish) == nil, "connection callback waits for L3 confirmation")
         check(parser.consume(l3) == logDate, "confirmed campus tunnel uses connection event timestamp")
         check(parser.consume(l3) == nil, "repeated mode lines do not duplicate event")
         _ = parser.consume(finish)
-        check(parser.consume("2020-01-02 10:00:01 MainWin::OnVpnConnected: display desktop tab.") == nil, "desktop-only session is not a campus tunnel")
-        check(parser.consume("2020-01-02 10:00:31 MainWin::OnVpnConnected: current tunnel type is L3VPN only") == nil, "stale callback cannot confirm another session")
+        check(parser.consume("2026-09-15 10:00:01 MainWin::OnVpnConnected: display desktop tab.") == nil, "desktop-only session is not a campus tunnel")
+        check(parser.consume("2026-09-15 10:00:31 MainWin::OnVpnConnected: current tunnel type is L3VPN only") == nil, "stale callback cannot confirm another session")
         _ = parser.consume(finish)
-        check(parser.consume("2020-01-02 10:00:01 MainWin::OnVpnConnected: get vpnd status is l3 connected, need send status both connected to vpnd.") == logDate, "combined desktop and L3 mode counts once")
+        check(parser.consume("2026-09-15 10:00:01 MainWin::OnVpnConnected: get vpnd status is l3 connected, need send status both connected to vpnd.") == logDate, "combined desktop and L3 mode counts once")
         check(parser.consume("invalid timestamp OnVpnConnected: vpn connected finish, start set display status.") == nil, "invalid log timestamp is rejected")
         let otp = OTPReading.parse(buttonDescriptions: ["AddButtonIcon", "12", "34", "56", "045"])
         check(otp?.code == "123456" && otp?.freshEnough == true, "OTP grouping and fresh clock")
@@ -291,6 +291,39 @@ import Security
         var duplicateRefused = false
         do { _ = try OfflineOTP.candidate(data: siteData(fakeSite, duplicate: true), username: "synthetic-user") } catch { duplicateRefused = true }
         check(duplicateRefused, "multiple matching sites cannot choose a seed implicitly")
+        var changedSource = fakeSite
+        changedSource["VirtualSiteRandomData"] = Array(repeating: 18, count: 10)
+        let changedSeed = try OfflineOTP.candidate(data: siteData(changedSource), username: "synthetic-user")
+        check(!syntheticToken.matchesSource(changedSeed), "changed official seed invalidates the enrolled copy")
+        changedSource = fakeSite; changedSource["VirtualSiteDyncode"] = 60
+        let changedPeriod = try OfflineOTP.candidate(data: siteData(changedSource), username: "synthetic-user")
+        check(!syntheticToken.matchesSource(changedPeriod), "changed official period needs a new live proof")
+        changedSource = fakeSite; changedSource["VirtualSiteInterval"] = 1.0
+        let changedOffset = try OfflineOTP.candidate(data: siteData(changedSource), username: "synthetic-user")
+        check(syntheticToken.matchesSource(changedOffset), "a valid clock offset refresh does not replace token identity")
+        var unboundSourceRefused = false
+        do { try syntheticToken.requireCurrentSource() } catch OfflineOTP.Failure.sourceUnverified { unboundSourceRefused = true }
+        check(unboundSourceRefused, "old tokens cannot bypass source binding during migration")
+        let sourceDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sourceDirectory) }
+        let sourceFile = sourceDirectory.appendingPathComponent("VSite.plist")
+        try siteData(fakeSite).write(to: sourceFile)
+        var boundToken = syntheticToken; boundToken.sourcePath = sourceFile.path
+        let boundSource = try boundToken.requireCurrentSource()
+        check(boundSource.seed == syntheticToken.seed, "unchanged source is accepted without a window")
+        try siteData(changedSource).write(to: sourceFile)
+        let refreshedSource = try boundToken.requireCurrentSource()
+        check(refreshedSource.clockUncertainty == 1.5, "runtime uses the current safe clock uncertainty")
+        changedSource["VirtualSiteRandomData"] = Array(repeating: 18, count: 10)
+        try siteData(changedSource).write(to: sourceFile)
+        var sourceMismatchRefused = false
+        do { try boundToken.requireCurrentSource() } catch OfflineOTP.Failure.sourceChanged { sourceMismatchRefused = true }
+        check(sourceMismatchRefused, "rebound official data is rejected before a login code is used")
+        try FileManager.default.removeItem(at: sourceFile)
+        var missingSourceRefused = false
+        do { try boundToken.requireCurrentSource() } catch OfflineOTP.Failure.sourceChanged { missingSourceRefused = true }
+        check(missingSourceRefused, "missing official data does not silently reuse a cached seed")
         for time in [59.1, 60.1, 60.9, -1, Double.infinity, Double.nan] {
             var refused = false
             do { _ = try syntheticToken.reading(at: time) } catch { refused = true }
@@ -372,6 +405,31 @@ import Security
         let corruptPolicy = RecoveryPolicy.loadOrHold(Data("broken-json".utf8), now: testNow)
         check(!corruptPolicy.enabled && corruptPolicy.manualHold, "corrupt persisted policy pauses automation")
         check(corruptPolicy.submissions.count == 2, "corrupt state cannot restore a fresh hourly submission budget")
+        for digest in VendorCipher.approvedClientKeyRanges.keys {
+            let range = try VendorCipher.verifiedKeyRange(digest: digest, binarySize: 3401944)
+            check(range == 0x22b740..<0x22b750, "reviewed native clients map the verified key range")
+            do {
+                _ = try VendorCipher.verifiedKeyRange(digest: digest, binarySize: range.upperBound - 1)
+                check(false, "truncated native client must be rejected")
+            } catch { check(true, "truncated native client rejected") }
+        }
+        do {
+            _ = try VendorCipher.verifiedKeyRange(digest: String(repeating: "0", count: 64), binarySize: 3401944)
+            check(false, "unreviewed same-sized client must be rejected")
+        } catch { check(true, "unreviewed same-sized client rejected") }
+        var alignment = OTPAlignmentProof()
+        for t in [3.0, 4.0, 5.0, 6.0] { alignment.observe(matches: true, before: t, after: t + 0.1, period: 30) }
+        check(!alignment.verified, "one official OTP period cannot prove sustained alignment")
+        alignment.observe(matches: true, before: 33, after: 33.1, period: 30)
+        check(alignment.verified, "multiple samples across two official periods prove alignment")
+        alignment.observe(matches: false, before: 34, after: 34.1, period: 30)
+        check(!alignment.verified && alignment.mismatchingSamples == 1, "a genuine live mismatch invalidates alignment")
+        var boundary = OTPAlignmentProof()
+        boundary.observe(matches: false, before: 29.9, after: 30.1, period: 30)
+        check(boundary.mismatchingSamples == 0, "UI sampling across rollover cannot falsely reject alignment")
+        boundary.observe(matches: true, before: 33, after: 32, period: 30)
+        boundary.observe(matches: true, before: 33, after: 40, period: 30)
+        check(boundary.matchingSamples == 0, "clock reversals and slow reads cannot establish alignment")
         let cipher = VendorCipher(testKey: Data(repeating: 0x47, count: 16))
         for secret in ["synthetic", "1234567890abcdef", "中文合成测试密码"] {
             let encrypted = try cipher.encrypt(secret)
@@ -388,6 +446,12 @@ import Security
         check(ini.value(section: "global", key: "unrelated") == "keep", "preserve unrelated setting")
         check(ini.value(section: "profiles", key: "data\\1\\new") == "x", "append within section")
         check(ini.value(section: "profiles", key: "data\\1\\password2") == nil, "remove temporary secret")
+        if CommandLine.arguments.contains("--check-installed-cipher") {
+            let installed = try VendorCipher(), profile = try VendorProfile.read(), p = try VendorProfile.prefix(profile)
+            let encoded = profile.value(section: "profiles", key: p + "password") ?? ""
+            let decoded = try installed.decrypt(encoded)
+            check(!decoded.isEmpty, "installed encrypted static credential decodes in memory")
+        }
         print("PASS: \(passed) checks; no credentials or OTP values emitted")
     }
 }

@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TOP = {"README.md", "LICENSE", "NOTICE.md", "SECURITY.md", ".gitignore",
-       "project.example.json", "build.py", "install.py"}
+       "project.example.json", "build.py", "install.py", "CHANGELOG.md"}
 FOLDERS = {"Sources": {".swift"}, "Tests": {".swift", ".py"},
            "scripts": {".py"}, "docs": {".md"}, "automation": {".md", ".json"},
            "examples": {".json", ".yml", ".yaml"}, ".github": {".yml", ".yaml"}}
@@ -23,6 +23,7 @@ RULES = {
     "cloud_access_key": re.compile(r"\bAKIA[A-Z0-9]{16}\b"),
     "private_key": re.compile(r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----"),
     "credential_bearing_url": re.compile(r"https?://[^\s/]+:[^\s/]+@"),
+    "embedded_signing_identity": re.compile(r'(?:signingCertificateSHA1\s*=\s*"|H\\?")[0-9a-f]{40}', re.I),
 }
 
 
@@ -43,7 +44,7 @@ def permitted(relative):
 
 def public_files():
     if (ROOT / ".git").is_dir():
-        result = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT,
+        result = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT,
                                 stdout=subprocess.PIPE, check=True)
         return [Path(x.decode()) for x in result.stdout.split(b"\0") if x]
     ignored = {"__pycache__", "dist", "artifacts", "signing", "releases", ".git"}

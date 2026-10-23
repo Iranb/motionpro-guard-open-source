@@ -100,6 +100,8 @@ def operate(action, root=SUPPORT, now=None, attempt_id=None, outcome=None):
         if policy["enabled"]:
             raise Refused("policy_enabled_pause_first")
         if action == "begin":
+            if policy.get("pendingOfficialAttempt") is not None or policy.get("pendingHeadlessAttempt") is not None:
+                raise Refused("unsettled_automatic_attempt")
             if record and record["outcome"] == "pending":
                 raise Refused("unsettled_manual_attempt")
             state = summary(policy, record, now)

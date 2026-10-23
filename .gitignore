@@ -24,6 +24,9 @@ recovery-policy.json
 watchdog-health.json
 manual-attempt.json
 pending-login*
+pending.json
+official-connector/
+*.motionproguard-oss.bak
 offline-otp*
 *receipt.json
 *repair-result.json

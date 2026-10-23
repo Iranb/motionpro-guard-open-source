@@ -41,9 +41,10 @@ python3 "SKILL_ROOT/scripts/handover.py" inspect
 读取 [自动流程与 OTP 同步](references/automatic-flow.md)，结合本轮状态判断：
 
 - 核对心跳、`lastProgressAt`、`recoveryBusy`、`profileMutationActive`、`stateDeadline`、策略开关和暂停预算。
-- 按阶段等待：持续断线确认约 30 秒；OTP 跨周期核对最多约 75 秒；新隧道等待最多约 120 秒；前置检查另计。不要用总计 120 秒打断正常恢复。
+- `automaticCheckMode=login_expiry` 时，按成功登录后 24 小时加 2 分钟触发，平时不轮询。`scheduled_idle=true` 不代表卡住，也不代表隧道仍在线；不要擅自恢复周期查询。
+- 按阶段等待：持续断线确认约 30 秒；默认 `official_profile` 等待安全 OTP 窗口，提交后观察隧道最多 180 秒；前置检查另计。
 - 有进度且未过本阶段截止时间时继续观察。陈旧状态、阶段超时、钥匙串/绑定失败或预算暂停须说明具体阻塞。
-- 后台 OTP 已导入且匹配时不依赖 OTP 窗口。只有令牌条目不存在才可用窗口取码备用；条目拒绝访问、无效或绑定不匹配不能悄悄换来源。
+- 默认 `official_profile` 使用官方已保存密码和每次新读取的官方令牌，不依赖旧 Guard 钥匙串或口令窗口。旧后端仅在条目不存在时允许窗口备用；拒绝访问或绑定不匹配不能悄悄换来源。
 - 看护任务只恢复 Guard 自身；不要把它描述成会重启 VPN 服务，也不要假定锁屏取码成功就已证明锁屏登录。
 
 ## 必要时接管人工备用恢复

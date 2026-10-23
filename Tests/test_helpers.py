@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 import build
+import install
 import manual_attempt as manual
 import preflight
 import release_audit
@@ -38,6 +39,20 @@ class ConfigurationTests(unittest.TestCase):
 
 
 class StatusTests(unittest.TestCase):
+    def test_scheduled_idle_keeps_freshness_honest(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "status.json"
+            now = 2000000000.0
+            anchor = now - preflight.SWIFT_EPOCH - 7200
+            path.write_text(json.dumps({"updatedAt": anchor, "lastSuccessfulLoginAt": anchor,
+                "nextCheckAt": now - preflight.SWIFT_EPOCH + 3600, "automaticCheckMode": "login_expiry",
+                "state": "connected", "recoveryBusy": False, "otp": "synthetic-private-code"}))
+            result = preflight.snapshot_summary(path, now)
+            self.assertTrue(result["scheduled_idle"])
+            self.assertFalse(result["fresh"])
+            self.assertEqual(result["lastSuccessfulLoginAt"], anchor)
+            self.assertNotIn("otp", result)
+
     def test_connected_exit_status_parser(self):
         self.assertEqual(preflight.parse_status("VPN status:2\n"), 2)
 
@@ -87,6 +102,16 @@ class ManualBudgetTests(unittest.TestCase):
         with self.assertRaises(manual.Refused):
             self.begin()
 
+    def test_unsettled_automatic_attempt_blocks_manual_reservation(self):
+        for key in ("pendingOfficialAttempt", "pendingHeadlessAttempt"):
+            with self.subTest(key=key):
+                policy = manual.default_policy()
+                policy[key] = "synthetic-unsettled-attempt"
+                manual.atomic_json(self.root / "recovery-policy.json", policy)
+                with self.assertRaisesRegex(manual.Refused, "unsettled_automatic_attempt"):
+                    self.begin()
+                self.assertEqual(manual.get_policy(self.root)["submissions"], [])
+
     def test_two_failures_hold_and_preserve_budget(self):
         first = self.begin()
         self.finish(first, "failure")
@@ -119,6 +144,12 @@ class ManualBudgetTests(unittest.TestCase):
 
 
 class PublicationTests(unittest.TestCase):
+    def test_watchdog_has_no_periodic_trigger(self):
+        watchdog = install.job_definitions()[1]
+        self.assertFalse(watchdog["RunAtLoad"])
+        self.assertNotIn("StartInterval", watchdog)
+        self.assertNotIn("StartCalendarInterval", watchdog)
+
     def test_source_allowlist(self):
         self.assertTrue(release_audit.permitted(Path("Sources/Engine.swift")))
         self.assertTrue(release_audit.permitted(Path("skills/motionpro-vpn-access/SKILL.md")))

@@ -275,7 +275,7 @@ final class GuardEngine: ObservableObject {
     private var episodeID: String?
     private var activeAttempt: LoginAttribution?
     private var sessionObservers: [NSObjectProtocol] = []
-    private let pathMonitor = NWPathMonitor()
+    private var scheduledRecoveryActive = false
     private var lastGatewayProbe = Date.distantPast
     private var gatewayReachable = false
     private var disconnectionWindow = DisconnectionWindow()
@@ -291,6 +291,7 @@ final class GuardEngine: ObservableObject {
     private var lastOTPActivation = Date.distantPast
     private var otpClock = OfflineOTP.Clock()
     private var offlineOTPPeriod: Int?
+    private var pendingHeadlessReconciled = false
     private var lockDescriptor: Int32 = -1
     private let policyURL = GuardIdentity.support.appendingPathComponent("recovery-policy.json")
     private let reconnectHistoryURL = GuardIdentity.support.appendingPathComponent("reconnect-history.json")
@@ -313,23 +314,70 @@ final class GuardEngine: ObservableObject {
     }
 
     func start() {
-        timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.check() }
-        }
         for name in [NSWorkspace.didWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
             sessionObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in
-                    self?.record("session_or_wake_changed")
                     self?.otpClock = OfflineOTP.Clock()
-                    await self?.check()
+                    self?.armScheduledEvaluation()
+                    self?.publish()
                 }
             })
         }
-        pathMonitor.pathUpdateHandler = { [weak self] _ in
-            Task { @MainActor in self?.lastGatewayProbe = .distantPast; await self?.check() }
-        }
-        pathMonitor.start(queue: DispatchQueue(label: "MotionProGuard.network-path"))
         Task { await check() }
+    }
+
+    private func armScheduledEvaluation() {
+        timer?.invalidate(); timer = nil
+        snapshot.automaticCheckMode = LoginExpirySchedule.mode
+        snapshot.lastSuccessfulLoginAt = policy.lastSuccessfulLoginAt
+        snapshot.nextCheckAt = nil
+        guard !scheduledRecoveryActive, !busy, policy.enabled, !policy.manualHold,
+              policy.consecutiveFailures < 2,
+              var next = LoginExpirySchedule.next(lastLogin: policy.lastSuccessfulLoginAt,
+                                                   evaluatedAt: policy.lastScheduledEvaluationAt) else { return }
+        if let manual = policy.manualControlUntil, manual > next { next = manual }
+        snapshot.nextCheckAt = next
+        let timer = Timer(fire: next, interval: 0, repeats: false) { [weak self] _ in
+            Task { @MainActor in await self?.scheduledEvaluation() }
+        }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func rememberSuccessfulLogin(_ date: Date?) {
+        guard let date, date <= Date(), date > (policy.lastSuccessfulLoginAt ?? .distantPast) else { return }
+        policy.lastSuccessfulLoginAt = date
+        savePolicy(); record("login_time_recorded")
+    }
+
+    /// Only the expected-expiry event opens this bounded observation window.
+    /// There is no status polling between scheduled events.
+    private func scheduledEvaluation() async {
+        guard !scheduledRecoveryActive, !checking, !busy else { return }
+        guard policy.enabled, !policy.manualHold else { armScheduledEvaluation(); publish(); return }
+        if let until = policy.manualControlUntil, until > Date() {
+            armScheduledEvaluation(); publish(); return
+        }
+        guard let due = LoginExpirySchedule.next(lastLogin: policy.lastSuccessfulLoginAt,
+                                                  evaluatedAt: policy.lastScheduledEvaluationAt), due <= Date() else {
+            armScheduledEvaluation(); publish(); return
+        }
+        scheduledRecoveryActive = true; timer?.invalidate(); timer = nil
+        policy.lastScheduledEvaluationAt = Date(); savePolicy()
+        record("scheduled_expiry_evaluation_started")
+        defer {
+            scheduledRecoveryActive = false
+            armScheduledEvaluation(); publish()
+        }
+        // Confirm a real disconnect for 30 seconds, or let an existing vendor
+        // transition finish. Authentication itself retains its own 180s bound.
+        let deadline = ProcessInfo.processInfo.systemUptime + 180
+        repeat {
+            await check()
+            guard ["disconnected", "connecting"].contains(snapshot.state),
+                  ProcessInfo.processInfo.systemUptime < deadline else { return }
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+        } while ProcessInfo.processInfo.systemUptime < deadline
     }
 
     func takeManualControl() {
@@ -345,15 +393,30 @@ final class GuardEngine: ObservableObject {
     }
 
     func savePolicy() {
-        if let data = try? JSONEncoder().encode(policy) {
-            try? data.write(to: policyURL, options: .atomic)
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: policyURL.path)
-        }
+        do { try RecoveryPolicyDisk.write(policy) }
+        catch { policy.manualHold = true; policy.enabled = false; setupMessage = HeadlessFailure.persistence.localizedDescription }
     }
     func setEnabled(_ enabled: Bool) { policy.enabled = enabled; savePolicy(); Task { await check() } }
     func releaseHold() {
         // A user can clear the failure hold, but not the two-submission rolling-hour budget.
         policy.manualHold = false; policy.consecutiveFailures = 0; savePolicy(); Task { await check() }
+    }
+
+    func configureOfficialSource() async {
+        guard !busy, !authorizingCredentials, LocalSession.unlocked else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+        panel.allowedFileTypes = ["plist"]
+        panel.message = "选择本机 MotionPro OTP 已绑定的 VSite.plist；只保存文件位置，不登录或更改绑定。"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        authorizingCredentials = true
+        defer { authorizingCredentials = false }
+        do {
+            try await Task.detached(priority: .utility) { try OfficialProfile.configure(source: url) }.value
+            await refreshOfficialReadiness()
+            setupMessage = "官方数据源已保存；静态密码继续使用 MotionPro 已保存值，尚未提交登录"
+        } catch { setupMessage = error.localizedDescription }
+        publish()
     }
 
     func importCredentials() async {
@@ -460,6 +523,18 @@ final class GuardEngine: ObservableObject {
                 let now = Date().timeIntervalSince1970
                 try otpClock.observe(wall: now, uptime: ProcessInfo.processInfo.systemUptime)
                 let reading = try token.reading(at: now)
+                // When the official window is available, reject any stable
+                // disagreement. Locked generation still needs no window.
+                if LocalSession.unlocked, let official = OTPEnrollment.reference() {
+                    let after = Date().timeIntervalSince1970
+                    if floor(now / Double(token.period)) == floor(after / Double(token.period)),
+                       now.truncatingRemainder(dividingBy: Double(token.period)) >= 2,
+                       reading.secondsRemaining >= 5, official.secondsRemaining >= 5 {
+                        guard reading.code == official.code else { throw OfflineOTP.Failure.officialMismatch }
+                        snapshot.officialOTPAlignmentState = "matched_live"
+                        snapshot.officialOTPComparedAt = Date()
+                    }
+                } else { snapshot.officialOTPAlignmentState = "verified_source_unchanged" }
                 snapshot.otpReady = true; snapshot.otpCheckState = "computed"
                 return reading
             } catch {
@@ -480,8 +555,13 @@ final class GuardEngine: ObservableObject {
             if !clockFailure {
                 snapshot.offlineOTPReady = false
                 if case OfflineOTP.Failure.binding = error { snapshot.offlineOTPCheckState = "binding_mismatch" }
+                else if case OfflineOTP.Failure.sourceUnverified = error { snapshot.offlineOTPCheckState = "source_unverified" }
+                else if case OfflineOTP.Failure.sourceChanged = error { snapshot.offlineOTPCheckState = "source_changed" }
+                else if case OfflineOTP.Failure.officialMismatch = error { snapshot.offlineOTPCheckState = "official_mismatch" }
                 else if case OfflineOTP.Failure.invalid = error { snapshot.offlineOTPCheckState = "invalid" }
                 else { snapshot.offlineOTPCheckState = "unavailable" }
+                snapshot.otpFreshnessState = "unverified"
+                snapshot.officialOTPAlignmentState = snapshot.offlineOTPCheckState
                 snapshot.otpReady = false; snapshot.otpCheckState = "unavailable"
             }
             throw error
@@ -499,6 +579,11 @@ final class GuardEngine: ObservableObject {
 
     func readiness() async {
         guard !authorizingCredentials && !busy else { return }
+        if (policy.recoveryBackend ?? OfficialProfile.backend) == OfficialProfile.backend {
+            await refreshOfficialReadiness()
+            setupMessage = snapshot.credentialReady ? "官方密码与实时令牌已就绪；没有提交登录或中断连接" : "官方配置或令牌不可读取；没有提交登录"
+            publish(); return
+        }
         snapshot.accessibilityReady = OTPReader.permission
         do {
             await refreshCredentials()
@@ -554,9 +639,36 @@ final class GuardEngine: ObservableObject {
         snapshot.lastCheckStartedAt = Date()
         defer {
             checking = false; snapshot.lastCheckCompletedAt = Date()
-            snapshot.nextCheckAt = Date().addingTimeInterval(10); publish()
+            armScheduledEvaluation(); publish()
         }
         let now = Date(); policy.prune(now: now)
+        snapshot.recoveryBackend = policy.recoveryBackend ?? OfficialProfile.backend
+        snapshot.headlessAcceptanceState = "locked_login_not_verified"
+        if let id = HeadlessCLI.consume(generation: journal.generation) {
+            snapshot.lastCLIRequestID = id
+            record("cli_recovery_requested", initiator: "user")
+        }
+        // A process that died after reservation may already have submitted.
+        // Settle once under the common lock; do not replay the old request.
+        if !pendingHeadlessReconciled, let control = RecoveryLease() {
+            do {
+                let saved = try RecoveryPolicyDisk.read()
+                if saved.pendingHeadlessAttempt != nil {
+                    policy = saved; policy.pendingHeadlessAttempt = nil; policy.failed()
+                    policy.manualHold = true
+                    try RecoveryPolicyDisk.write(policy)
+                    record("headless_interrupted_attempt_settled", reason: "unknown_submission_result")
+                }
+                if saved.pendingOfficialAttempt != nil {
+                    policy = saved; policy.pendingOfficialAttempt = nil; policy.failed()
+                    policy.manualHold = true
+                    try RecoveryPolicyDisk.write(policy)
+                    record("official_interrupted_attempt_settled", reason: "unknown_submission_result")
+                }
+                pendingHeadlessReconciled = true
+            } catch { policy.manualHold = true; policy.enabled = false }
+            withExtendedLifetime(control) { }
+        }
         snapshot.manualControlUntil = policy.manualControlUntil
         snapshot.confirmedRecoveryCount = policy.confirmedSuccessCount ?? 0
         let lockedDates = policy.lockedSuccessDates ?? []
@@ -577,7 +689,7 @@ final class GuardEngine: ObservableObject {
         guard let status = observation else {
             set("unknown", "状态不可读", "未尝试登录；请检查 MotionPro 后台服务"); return
         }
-        if !pendingProfileReconciled && !status.isBusy && !authorizingCredentials
+        if snapshot.recoveryBackend != OfficialProfile.backend && !pendingProfileReconciled && !status.isBusy && !authorizingCredentials
            && (policy.manualControlUntil ?? .distantPast) <= Date()
            && Date().timeIntervalSince(lastProfileReconcile) >= 60, let control = RecoveryLease() {
             lastProfileReconcile = Date()
@@ -592,6 +704,9 @@ final class GuardEngine: ObservableObject {
             withExtendedLifetime(control) { }
         }
         if status.hasTunnel {
+            if snapshot.recoveryBackend == OfficialProfile.backend && lastCredentialCheck == .distantPast {
+                await refreshOfficialReadiness()
+            }
             if snapshot.state != "connected", activeAttempt == nil {
                 snapshot.lastConnectionInitiator = "external_or_unknown"
                 record("external_connection_observed", status: status, initiator: "external_or_unknown")
@@ -599,8 +714,14 @@ final class GuardEngine: ObservableObject {
             episodeID = nil; snapshot.episodeID = nil
             if snapshot.connectedSince == nil { snapshot.connectedSince = now }
             if now.timeIntervalSince(lastLogCheck) > 60 { snapshot.authenticatedAt = await LogHints.boundedAuthentication(); lastLogCheck = now }
+            rememberSuccessfulLogin(snapshot.authenticatedAt)
             let detail: String
             if !policy.enabled { detail = "校园网已连接 · 自动恢复已暂停" }
+            else if policy.manualHold { detail = "连接正常 · 失败保护已暂停自动登录" }
+            else if snapshot.recoveryBackend == OfficialProfile.backend {
+                detail = snapshot.credentialReady ? "按成功登录时间安排恢复 · 不轮询连接" : "连接正常 · 自动恢复配置待检查"
+            }
+            else if snapshot.recoveryBackend == "headless_native" { detail = "连接正常 · 已启用无窗口恢复流程" }
             else if snapshot.credentialCheckState == nil { detail = "连接正常 · 断线时检查凭据与 OTP" }
             else if !snapshot.credentialReady { detail = "连接正常 · 自动恢复待检查钥匙串" }
             else if !snapshot.otpAccessReady { detail = "连接正常 · 后台取码待就绪" }
@@ -615,13 +736,20 @@ final class GuardEngine: ObservableObject {
             episodeID = UUID().uuidString; snapshot.episodeID = episodeID
             record("persistent_disconnect_confirmed", status: status)
         }
-        guard policy.enabled else { set("paused", "自动恢复已暂停", "监控仍在运行；开启后可自动登录"); return }
+        guard policy.enabled else { set("paused", "自动恢复已暂停", "开启后按成功登录时间安排恢复"); return }
         if let until = policy.manualControlUntil, until > now {
-            set("waiting", "手动接管中", "十分钟接管期内持续监控；到期恢复自动处理", reason: "manual_control"); return
+            set("waiting", "手动接管中", "接管期内不提交登录；到期后按计划恢复", reason: "manual_control"); return
         }
-        guard !authorizingCredentials else { set("permission", "等待钥匙串授权", "后台状态监控继续运行"); return }
-        if now.timeIntervalSince(lastCredentialCheck) > 60 { await refreshCredentials() }
+        guard !authorizingCredentials else { set("permission", "等待钥匙串授权", "完成授权后可按计划恢复"); return }
+        if now.timeIntervalSince(lastCredentialCheck) > 60 {
+            if snapshot.recoveryBackend == OfficialProfile.backend { await refreshOfficialReadiness() }
+            else { await refreshCredentials() }
+        }
         guard snapshot.credentialReady else {
+            if snapshot.recoveryBackend == OfficialProfile.backend {
+                set("setup", "自动登录未就绪", setupMessage)
+                return
+            }
             if snapshot.credentialCheckState == "missing" {
                 set("setup", "待导入账号", "从现有 MotionPro 配置导入钥匙串")
             } else { set("permission", "钥匙串暂不可读", "打开小组件管理页，点击授权钥匙串；后台不会弹窗") }
@@ -648,16 +776,25 @@ final class GuardEngine: ObservableObject {
         }
         // Background reading is allowed even when the desktop is locked.
         // Only an unlocked session may activate the app as a fallback.
-        do { _ = try await readOTP() }
+        do {
+            if snapshot.recoveryBackend == OfficialProfile.backend {
+                _ = try await ReadDeadline.run(seconds: 5) { try OfficialProfile.load() }
+            }
+            else if snapshot.recoveryBackend == "headless_native" { _ = try await freshOfflineOTP() }
+            else if snapshot.recoveryBackend == "legacy_ui" { _ = try await readOTP() }
+            else { throw HeadlessFailure.nativeChanged }
+        }
         catch {
-            if snapshot.otpProvider == "accessibility", LocalSession.unlocked && now.timeIntervalSince(lastOTPActivation) >= 60 {
+            if snapshot.recoveryBackend == "legacy_ui", snapshot.otpProvider == "accessibility", LocalSession.unlocked && now.timeIntervalSince(lastOTPActivation) >= 60 {
                 OTPReader.openApp(); lastOTPActivation = now
             }
             set("otp", "动态口令暂不可读", error.localizedDescription)
             return
         }
         checking = false
-        await recover()
+        if snapshot.recoveryBackend == OfficialProfile.backend { await recoverOfficial() }
+        else if snapshot.recoveryBackend == "headless_native" { await recoverHeadless() }
+        else { await recover() }
     }
 
     private func set(_ state: String, _ title: String, _ detail: String, reason: String? = nil) {
@@ -703,6 +840,8 @@ final class GuardEngine: ObservableObject {
     }
     func publish() {
         snapshot.updatedAt = Date()
+        snapshot.automaticCheckMode = LoginExpirySchedule.mode
+        snapshot.lastSuccessfulLoginAt = policy.lastSuccessfulLoginAt
         snapshot.recoveryBusy = busy || authorizingCredentials
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         try? data.write(to: GuardIdentity.snapshotURL, options: .atomic)
@@ -734,17 +873,300 @@ final class GuardEngine: ObservableObject {
 
     /// Bounded, allowlisted events only. Never store credentials, OTP, or raw
     /// vendor errors; preserve enough ordering to explain a client shutdown.
-    private func recoveryEvent(_ name: String, status: VendorStatus? = nil) {
-        struct Event: Codable { let at: Date; let name: String; let vendorStatus: Int?; var otpProvider: String?; var locked: Bool? }
-        record(name, status: status, initiator: activeAttempt == nil ? nil : "guard")
+    private func recoveryEvent(_ name: String, status: VendorStatus? = nil, failure: HeadlessFailure? = nil) {
+        struct Event: Codable { let at: Date; let name: String; let vendorStatus: Int?; var otpProvider: String?; var locked: Bool?; var reason: String? }
+        record(name, reason: failure?.rawValue, status: status, initiator: activeAttempt == nil ? nil : "guard")
         snapshot.lastProgressAt = Date()
         let url = GuardIdentity.support.appendingPathComponent("recovery-events.json")
         var events = (try? JSONDecoder().decode([Event].self, from: Data(contentsOf: url))) ?? []
         events.append(Event(at: Date(), name: name, vendorStatus: status?.rawValue,
-                            otpProvider: snapshot.otpProvider, locked: LocalSession.isLocked))
+                            otpProvider: snapshot.otpProvider, locked: LocalSession.isLocked, reason: failure?.rawValue))
         if let data = try? JSONEncoder().encode(Array(events.suffix(200))) {
             try? data.write(to: url, options: .atomic)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        }
+    }
+
+    /// This path has no AppKit/AX activation, profile write, client termination
+    /// or terminal prompt. Every secret read retains Vault's silent policy.
+    private func freshOfflineOTP() async throws -> OTPReading {
+        let deadline = ProcessInfo.processInfo.systemUptime + 40
+        snapshot.otpProvider = "offline_totp"
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            let token = try await ReadDeadline.run(seconds: 5) { try OfflineOTP.load() }
+            do { try otpClock.observe(wall: Date().timeIntervalSince1970, uptime: ProcessInfo.processInfo.systemUptime) }
+            catch OfflineOTP.Failure.clockSettling {
+                try await Task.sleep(nanoseconds: 1_000_000_000); continue
+            }
+            let reading: OTPReading
+            do { reading = try token.reading(at: Date().timeIntervalSince1970) }
+            catch OfflineOTP.Failure.clockBoundary {
+                try await Task.sleep(nanoseconds: 1_000_000_000); continue
+            }
+            snapshot.offlineOTPReady = true; snapshot.offlineOTPCheckState = "ready"
+            snapshot.otpReady = true; snapshot.otpCheckedAt = Date()
+            snapshot.otpFreshnessState = reading.freshEnough ? "verified_source_unchanged" : "waiting_for_valid_window"
+            if LocalSession.isLocked { snapshot.lockedOTPGenerationSamples = (snapshot.lockedOTPGenerationSamples ?? 0) + 1 }
+            if reading.freshEnough { return reading }
+            publish(); try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        throw HeadlessFailure.offlineRequired
+    }
+
+    private func recoverHeadless() async {
+        guard !busy, let control = RecoveryLease() else { return }
+        busy = true; activeAttempt = LoginAttribution(); snapshot.attemptID = activeAttempt?.id
+        snapshot.profileMutationActive = false; snapshot.headlessPhase = "preparing"
+        let transport = PrivateGatewayTransport()
+        let gateway = HeadlessGateway(transport: transport.send)
+        var reserved = false
+        var lockedThroughout = LocalSession.isLocked
+        var interference = false
+        let originalClient = NSRunningApplication.runningApplications(withBundleIdentifier: "com.arraynetworks.motionpro").first?.processIdentifier
+        defer {
+            transport.close(); withExtendedLifetime(control) { }
+            busy = false; activeAttempt = nil; snapshot.attemptID = nil
+            lastAttemptEnd = Date(); publish()
+        }
+        do {
+            policy = try RecoveryPolicyDisk.read()
+            guard policy.allowed(now: Date()), policy.pendingHeadlessAttempt == nil else { throw GuardFailure.retryLimit }
+            guard let credentials = try await ReadDeadline.run(seconds: 5, operation: { try Vault.credentials() }) else { throw GuardFailure.invalidCredentials }
+            try await ReadDeadline.run(seconds: 5) { try VendorProfile.validateForLogin(credentials: credentials) }
+            let native = try await Task.detached { try NativeTunnel() }.value
+            let ops = HeadlessRecoveryFlow.Operations(status: {
+                let observation = try await Task.detached { try native.status() }.value
+                if observation.status.hasTunnel, observation.gatewayName != GuardIdentity.host { throw HeadlessFailure.nativeProtocol }
+                return observation.status
+            }, prepare: { try await gateway.prepare() }, freshOTP: {
+                let reading = try await self.freshOfflineOTP()
+                lockedThroughout = lockedThroughout && LocalSession.isLocked
+                return reading
+            }, validate: {
+                lockedThroughout = lockedThroughout && LocalSession.isLocked
+                let permitted = reserved
+                    ? self.policy.enabled && !self.policy.manualHold && self.policy.consecutiveFailures < 2
+                        && (self.policy.manualControlUntil ?? .distantPast) <= Date()
+                    : self.policy.allowed(now: Date())
+                guard permitted, LocalSession.networkAvailable else { throw HeadlessFailure.interrupted }
+                try await ReadDeadline.run(seconds: 5) { try VendorProfile.validateForLogin(credentials: credentials) }
+                try await Task.detached { try native.requireSameService() }.value
+                let client = NSRunningApplication.runningApplications(withBundleIdentifier: "com.arraynetworks.motionpro").first
+                guard client?.processIdentifier == originalClient,
+                      !(LocalSession.unlocked && client?.isActive == true) else { throw HeadlessFailure.interrupted }
+            }, reserve: {
+                guard let id = self.activeAttempt?.id else { throw HeadlessFailure.interrupted }
+                let saved = try RecoveryPolicyDisk.read()
+                guard saved.allowed(now: Date()), saved.pendingHeadlessAttempt == nil else { throw GuardFailure.retryLimit }
+                self.policy = saved; try self.policy.submit(now: Date())
+                self.policy.pendingHeadlessAttempt = id
+                try RecoveryPolicyDisk.write(self.policy)
+                reserved = true; self.snapshot.lastSubmissionAt = Date()
+                self.snapshot.attemptsThisHour = self.policy.submissions.count
+                self.activeAttempt?.submitted(at: Date())
+                self.recoveryEvent("headless_submission_reserved")
+            }, authenticate: { form, reading in
+                try await gateway.authenticate(form: form, credentials: credentials, reading: reading)
+            }, start: { session in
+                try await Task.detached { try native.start(session) }.value
+                self.recoveryEvent("native_session_start_sent")
+            }, phase: { phase in
+                self.snapshot.headlessPhase = phase
+                self.recoveryEvent(phase)
+                self.set("recovering", "后台恢复中", "使用已验证令牌与官方隧道服务；无需填写窗口", reason: phase)
+            }, wait: {
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                lockedThroughout = lockedThroughout && LocalSession.isLocked
+                let client = NSRunningApplication.runningApplications(withBundleIdentifier: "com.arraynetworks.motionpro").first
+                if client?.processIdentifier != originalClient || (LocalSession.unlocked && client?.isActive == true)
+                    || (self.policy.manualControlUntil ?? .distantPast) > Date() { interference = true }
+                self.snapshot.lastProgressAt = Date(); self.publish()
+            })
+            let result = try await HeadlessRecoveryFlow.run(ops)
+            policy.pendingHeadlessAttempt = nil
+            // The vendor status API does not expose a session identifier. Keep
+            // automatic attribution conservative until a real acceptance run.
+            if result.transitionObserved && !interference {
+                policy.succeeded(now: Date())
+                snapshot.lastConnectionInitiator = "headless_session_transition_observed"
+            } else { snapshot.lastConnectionInitiator = "unknown_or_external" }
+            try RecoveryPolicyDisk.write(policy)
+            snapshot.headlessPhase = "tunnel_observed"
+            snapshot.lastRecovery = policy.lastSuccess; snapshot.recoveryCount = policy.successCount
+            snapshot.backgroundOTPVerifiedWhileLocked = lockedThroughout
+            lastReconnectScan = .distantPast; await refreshReconnectStats(now: Date())
+            record("headless_tunnel_observed", status: .connected, initiator: snapshot.lastConnectionInitiator)
+            set("connected", "已连接", "后台认证后隧道已建立；完整锁屏验收仍待实测")
+        } catch {
+            if reserved {
+                policy.pendingHeadlessAttempt = nil; policy.failed()
+                do { try RecoveryPolicyDisk.write(policy) }
+                catch { policy.manualHold = true; policy.enabled = false }
+            }
+            snapshot.headlessPhase = reserved ? "failed_after_reservation" : "stopped_before_submission"
+            recoveryEvent(snapshot.headlessPhase!, failure: error as? HeadlessFailure)
+            let message = (error as? HeadlessFailure)?.localizedDescription
+                ?? (error as? GuardFailure)?.localizedDescription
+                ?? (error as? OfflineOTP.Failure)?.localizedDescription ?? "后台恢复停止；未重复提交登录"
+            if case RecoveryInterrupted.tunnelState = error {
+                set("waiting", "状态已变化", "已停止后台登录，重新核对实际隧道", reason: "native_state_changed")
+            } else { set("attention", "后台恢复待处理", message, reason: "headless_recovery_stopped") }
+        }
+    }
+
+    private func refreshOfficialReadiness() async {
+        do {
+            _ = try await ReadDeadline.run(seconds: 5) { try OfficialProfile.load() }
+            snapshot.credentialReady = true; snapshot.credentialCheckState = "official_profile_ready"
+            snapshot.offlineOTPReady = true; snapshot.offlineOTPCheckState = "official_source_ready"
+            snapshot.otpReady = true; snapshot.otpCheckState = "source_readable"
+            snapshot.otpProvider = "official_local_binding"
+            snapshot.officialOTPAlignmentState = "fresh_official_source"
+            setupMessage = "官方已保存密码和当前令牌均可读取"
+        } catch {
+            snapshot.credentialReady = false; snapshot.credentialCheckState = "official_profile_unavailable"
+            snapshot.offlineOTPReady = false; snapshot.offlineOTPCheckState = "unavailable"
+            snapshot.otpReady = false; snapshot.otpCheckState = "unavailable"
+            setupMessage = error is ReadDeadline.Expired ? "读取官方配置超时；未提交登录" : error.localizedDescription
+        }
+        lastCredentialCheck = Date(); snapshot.credentialCheckedAt = Date(); snapshot.otpCheckedAt = Date()
+    }
+
+    private func requireOfficialIdle() async throws {
+        try OfficialProfile.requireIdle(status: await VendorHelper.status(),
+            clientRunning: !NSRunningApplication.runningApplications(withBundleIdentifier: "com.arraynetworks.motionpro").isEmpty)
+    }
+
+    private func recoverOfficial() async {
+        guard !busy, let control = RecoveryLease() else { return }
+        busy = true; activeAttempt = LoginAttribution(); snapshot.attemptID = activeAttempt?.id
+        var profileControl: OfficialProfileLease?
+        var submitted = false
+        var lockedThroughout = LocalSession.isLocked
+        defer {
+            withExtendedLifetime(profileControl) { }; withExtendedLifetime(control) { }
+            busy = false; activeAttempt = nil; snapshot.attemptID = nil
+            snapshot.profileMutationActive = false
+            lastAttemptEnd = Date(); savePolicy(); publish()
+        }
+        do {
+            policy = try RecoveryPolicyDisk.read()
+            guard policy.allowed(now: Date()) else { throw GuardFailure.retryLimit }
+            try RecoveryFlow.requireDisconnected(await VendorHelper.status())
+            // Verify both sources before requesting a normal exit of an offline client.
+            let initial = try await ReadDeadline.run(seconds: 5) { try OfficialProfile.load() }
+            let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.arraynetworks.motionpro")
+            guard apps.count <= 1 else { throw GuardFailure.message("存在多个客户端；未提交登录") }
+            if let client = apps.first {
+                guard !(LocalSession.unlocked && client.isActive) else {
+                    throw GuardFailure.message("客户端正在由用户操作；等待切换窗口")
+                }
+                try RecoveryFlow.requireDisconnected(await VendorHelper.status())
+                guard policy.allowed(now: Date()), LocalSession.networkAvailable else { throw GuardFailure.retryLimit }
+                set("recovering", "准备自动登录", "正在正常关闭已断线的客户端", reason: "closing_offline_client")
+                recoveryEvent("official_offline_client_close_requested"); publish()
+                guard client.terminate() else { throw GuardFailure.message("客户端弹窗阻止正常退出；未提交登录") }
+                for _ in 0..<60 {
+                    if client.isTerminated { break }
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+                guard client.isTerminated else { throw GuardFailure.message("等待客户端正常退出；未强制结束进程") }
+            }
+            try await requireOfficialIdle()
+            guard let lease = OfficialProfileLease() else {
+                throw GuardFailure.message("配置恢复助手正在工作；等待下一轮检查")
+            }
+            profileControl = lease
+            try await requireOfficialIdle()
+            snapshot.profileMutationActive = true; publish()
+            try OfficialProfile.restore()
+            let context = try OfficialProfile.load()
+            guard context.username == initial.username, context.token.matchesSource(initial.token) else {
+                throw GuardFailure.message("退出期间账号或令牌已变化；等待下一轮检查")
+            }
+            set("recovering", "等候新动态口令", "从官方当前绑定计算口令，等待足够有效期", reason: "waiting_fresh_official_otp")
+            snapshot.profileMutationActive = false; publish()
+            var clock = OfflineOTP.Clock()
+            let otpDeadline = ProcessInfo.processInfo.systemUptime + Double(context.token.period) + 3
+            var fresh: OTPReading?
+            while ProcessInfo.processInfo.systemUptime < otpDeadline {
+                lockedThroughout = lockedThroughout && LocalSession.isLocked
+                try await requireOfficialIdle()
+                guard policy.allowed(now: Date()), LocalSession.networkAvailable else { throw GuardFailure.retryLimit }
+                let current = try OfficialProfile.load()
+                guard current.bytes == context.bytes, current.token.matchesSource(context.token),
+                      current.token.clockUncertainty == context.token.clockUncertainty else {
+                    throw GuardFailure.message("等待期间官方配置或令牌已变化；未提交登录")
+                }
+                do {
+                    try clock.observe(wall: Date().timeIntervalSince1970, uptime: ProcessInfo.processInfo.systemUptime)
+                    let reading = try current.token.reading(at: Date().timeIntervalSince1970)
+                    if reading.secondsRemaining >= 20 { fresh = reading; break }
+                } catch OfflineOTP.Failure.clockSettling { }
+                  catch OfflineOTP.Failure.clockBoundary { }
+                snapshot.lastProgressAt = Date(); publish()
+                try await Task.sleep(nanoseconds: 500_000_000)
+            }
+            guard let fresh else { throw GuardFailure.message("等待安全口令窗口超时；未提交登录") }
+            try await requireOfficialIdle()
+            snapshot.profileMutationActive = true; publish()
+            try OfficialProfile.prepare(context, code: fresh.code)
+            recoveryEvent("official_profile_prepared")
+            try await requireOfficialIdle()
+            guard policy.allowed(now: Date()), LocalSession.networkAvailable else { throw GuardFailure.retryLimit }
+            try clock.observe(wall: Date().timeIntervalSince1970, uptime: ProcessInfo.processInfo.systemUptime)
+            let submissionSource = try OfficialProfile.load()
+            let submissionReading = try submissionSource.token.reading(at: Date().timeIntervalSince1970)
+            guard submissionSource.username == context.username, submissionSource.token.matchesSource(context.token),
+                  submissionSource.token.clockUncertainty == context.token.clockUncertainty,
+                  submissionReading.code == fresh.code, submissionReading.secondsRemaining >= 20 else {
+                throw GuardFailure.message("口令或官方绑定已变化；未提交登录，等待下一轮")
+            }
+            // One durable reservation immediately precedes the one client launch.
+            // Readiness, waiting and client-exit failures spend no submission budget.
+            let started = Date()
+            var reserved = policy
+            try reserved.submit(now: started); reserved.pendingOfficialAttempt = activeAttempt?.id
+            try RecoveryPolicyDisk.write(reserved); policy = reserved; submitted = true
+            snapshot.lastSubmissionAt = started; snapshot.attemptsThisHour = policy.submissions.count
+            activeAttempt?.submitted(at: started); recoveryEvent("official_login_submission_intent")
+            let pid = try await launchClient(); activeAttempt?.launched(pid: pid)
+            snapshot.profileMutationActive = false
+            set("recovering", "正在自动登录", "已启动官方客户端，等待 VPN 隧道建立", reason: "waiting_official_tunnel")
+            recoveryEvent("official_client_launched"); publish()
+            let deadline = ProcessInfo.processInfo.systemUptime + 180
+            while ProcessInfo.processInfo.systemUptime < deadline {
+                lockedThroughout = lockedThroughout && LocalSession.isLocked
+                let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.arraynetworks.motionpro").first
+                activeAttempt?.observe(pid: app?.processIdentifier,
+                    userActive: LocalSession.unlocked && app?.isActive == true,
+                    manualLease: (policy.manualControlUntil ?? .distantPast) > Date())
+                if let status = await VendorHelper.status(), status.hasTunnel {
+                    let authentication = await LogHints.boundedAuthentication()
+                    let attribution = activeAttempt?.classify(authenticationAt: authentication, connectedPID: app?.processIdentifier) ?? "unknown_or_external"
+                    if attribution == "guard_submission_confirmed" { policy.confirmed(now: Date(), locked: lockedThroughout) }
+                    else { policy.succeeded(now: Date()) }
+                    if let authentication, authentication >= started { policy.lastSuccessfulLoginAt = authentication }
+                    policy.pendingOfficialAttempt = nil; snapshot.lastConnectionInitiator = attribution
+                    snapshot.authenticatedAt = authentication; lastReconnectScan = .distantPast
+                    recoveryEvent("official_tunnel_connected", status: status)
+                    set("connected", "已连接", "VPN 隧道已建立；临时配置在断开并退出客户端后恢复")
+                    // Qt retains settings in memory. Never restore under a live client.
+                    return
+                }
+                if try await LogHints.boundedRejections(since: started) > 0 {
+                    throw GuardFailure.message("官方客户端报告认证失败；请检查已保存密码和令牌绑定")
+                }
+                snapshot.lastProgressAt = Date(); snapshot.stateDeadline = Date().addingTimeInterval(max(0, deadline - ProcessInfo.processInfo.systemUptime))
+                publish(); try await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+            throw GuardFailure.message("三分钟内未确认隧道建立；本次不再提交")
+        } catch {
+            if profileControl != nil, !submitted, (try? await requireOfficialIdle()) != nil { try? OfficialProfile.restore() }
+            if submitted { policy.pendingOfficialAttempt = nil; policy.failed() }
+            recoveryEvent(submitted ? "official_failed_after_submission" : "official_stopped_before_submission")
+            setupMessage = error.localizedDescription
+            set("attention", "自动登录待检查", error.localizedDescription)
         }
     }
 
@@ -756,7 +1178,7 @@ final class GuardEngine: ObservableObject {
             withExtendedLifetime(control) { }
             busy = false; activeAttempt = nil; snapshot.attemptID = nil
             snapshot.profileMutationActive = false
-            lastAttemptEnd = Date(); savePolicy(); publish(); Task { await check() }
+            lastAttemptEnd = Date(); savePolicy(); publish()
         }
         var submitted = false
         var profileTouched = false
@@ -823,7 +1245,7 @@ final class GuardEngine: ObservableObject {
             }, submit: {
                 lockedThroughout = lockedThroughout && LocalSession.isLocked
                 // Spend the shared budget only immediately before a login launch.
-                try self.policy.submit(now: Date()); self.savePolicy(); submitted = true
+                try self.policy.submit(now: Date()); try RecoveryPolicyDisk.write(self.policy); submitted = true
                 self.snapshot.attemptsThisHour = self.policy.submissions.count
                 started = Date(); self.snapshot.lastSubmissionAt = started
                 self.activeAttempt?.submitted(at: started)
@@ -925,7 +1347,7 @@ final class GuardEngine: ObservableObject {
                     // a fresh calculation and stable clock, not a UI rollover.
                     // The explicit probe also witnesses a period advancing.
                     if reading.freshEnough && (!probeOnly || (firstOfflinePeriod != step && offlineSampleCount >= 3)) {
-                        snapshot.otpFreshnessState = "verified"
+                        snapshot.otpFreshnessState = "verified_source_unchanged"
                         return (reading, sampledAt, lockedThroughout)
                     }
                     snapshot.otpFreshnessState = "waiting_for_valid_window"

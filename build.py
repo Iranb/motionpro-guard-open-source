@@ -15,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 BUNDLE = "org.motionproguard.app"
 APP_NAME = "MotionPro Guard OSS"
-VERSION = "1.3.0"
+VERSION = "1.6.1"
 
 
 def configuration(path):
@@ -87,9 +87,13 @@ def main():
                 "-module-cache-path", str(stage / "module-cache")]
         common = [str(stage / "Sources" / name) for name in
                   ("BuildConfiguration.swift", "Shared.swift", "Credentials.swift",
-                   "RecoveryFlow.swift", "OfflineOTP.swift", "Reliability.swift")]
-        run(base + common + [str(stage / "Tests/CoreTests.swift"), "-o", str(stage / "CoreTests")])
-        run([str(stage / "CoreTests")])
+                   "RecoveryFlow.swift", "OfflineOTP.swift", "Reliability.swift", "OfficialProfile.swift")]
+        headless = [str(stage / "Sources" / name) for name in
+                    ("HeadlessGateway.swift", "NativeTunnel.swift", "HeadlessRecovery.swift")]
+        for suite, dependencies in (("CoreTests", common), ("HeadlessTests", common + headless),
+                                    ("OfficialProfileTests", common), ("LoginScheduleTests", common)):
+            run(base + dependencies + [str(stage / "Tests" / (suite + ".swift")), "-o", str(stage / suite)])
+            run([str(stage / suite)])
         if args.test_only:
             return
         app = stage / (APP_NAME + ".app")
@@ -97,28 +101,34 @@ def main():
         (app / "Contents/MacOS").mkdir(parents=True)
         (app / "Contents/Resources").mkdir()
         (ext / "Contents/MacOS").mkdir(parents=True)
-        run(base + common + [str(stage / "Sources" / name) for name in
+        run(base + common + headless + [str(stage / "Sources" / name) for name in
             ("Engine.swift", "OTPEnrollment.swift", "GuardApp.swift", "GatewayProbe.swift", "Watchdog.swift")]
             + ["-o", str(app / "Contents/MacOS/MotionProGuard")])
         run(base + ["-application-extension", "-Xlinker", "-e", "-Xlinker", "_NSExtensionMain",
             str(stage / "Sources/BuildConfiguration.swift"), str(stage / "Sources/Shared.swift"),
             str(stage / "Sources/GuardWidget.swift"), "-o", str(ext / "Contents/MacOS/MotionProGuardWidget")])
         info = {"CFBundleInfoDictionaryVersion": "6.0", "CFBundleShortVersionString": VERSION,
-                "CFBundleVersion": "11", "CFBundleDevelopmentRegion": "zh_CN",
+                "CFBundleVersion": "18", "CFBundleDevelopmentRegion": "zh_CN",
                 "LSMinimumSystemVersion": "14.0", "CFBundleSupportedPlatforms": ["MacOSX"]}
         write_plist(app / "Contents/Info.plist", dict(info, CFBundleIdentifier=BUNDLE,
             CFBundleName=APP_NAME, CFBundleDisplayName=APP_NAME, CFBundleExecutable="MotionProGuard",
             CFBundlePackageType="APPL", LSUIElement=True, NSHighResolutionCapable=True,
             NSPrincipalClass="NSApplication", GuardGateway=gateway, GuardSigningCertificateSHA1=fingerprint,
+            NSAppleEventsUsageDescription="在 VPN 已断开时重新启动 MotionPro，使用新的动态口令登录。",
+            NSAppTransportSecurity={"NSExceptionDomains": {gateway: {
+                "NSExceptionRequiresForwardSecrecy": False, "NSExceptionMinimumTLSVersion": "TLSv1.2",
+                "NSIncludesSubdomains": False, "NSExceptionAllowsInsecureHTTPLoads": False}}},
             CFBundleURLTypes=[{"CFBundleURLName": APP_NAME, "CFBundleURLSchemes": ["motionpro-guard-oss"]}]))
         write_plist(ext / "Contents/Info.plist", dict(info, CFBundleIdentifier=BUNDLE + ".widget",
             CFBundleName=APP_NAME, CFBundleDisplayName=APP_NAME, CFBundleExecutable="MotionProGuardWidget",
             CFBundlePackageType="XPC!", NSExtension={"NSExtensionPointIdentifier": "com.apple.widgetkit-extension"}))
         write_plist(stage / "widget.entitlements", {"com.apple.security.app-sandbox": True})
+        write_plist(stage / "host.entitlements", {"com.apple.security.automation.apple-events": True})
         identity = fingerprint or "-"
         run(["codesign", "--force", "--sign", identity, "--timestamp=none", "--entitlements",
              str(stage / "widget.entitlements"), str(ext)])
-        run(["codesign", "--force", "--sign", identity, "--timestamp=none", str(app)])
+        run(["codesign", "--force", "--sign", identity, "--timestamp=none", "--entitlements",
+             str(stage / "host.entitlements"), str(app)])
         run(["codesign", "--verify", "--deep", "--strict", str(app)])
         if fingerprint:
             requirement = f'=identifier "{BUNDLE}" and certificate leaf = H"{fingerprint}"'
@@ -128,7 +138,10 @@ def main():
         target = output / app.name
         if target.exists():
             raise ValueError("Output app already exists; choose a fresh --output directory")
-        shutil.copytree(app, target)
+        shutil.copytree(app, target, copy_function=shutil.copy)
+        # File-provider metadata is not part of a newly built signed bundle.
+        # Clean only this output; installed and downloaded apps are untouched.
+        run(["xattr", "-cr", str(target)])
         run(["codesign", "--verify", "--deep", "--strict", str(target)])
         print("Built and verified:", target)
         print("App staged only; no login jobs, Keychain changes or VPN operations performed.")

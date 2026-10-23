@@ -75,22 +75,24 @@ def snapshot_summary(path, now):
         out[key] = value[key] if type(value.get(key)) is bool else None
     credential_state = value.get("credentialCheckState")
     out["credentialCheckState"] = (credential_state if credential_state in
-                                   ("ready", "missing", "unavailable") else "unknown")
+                                   ("ready", "missing", "unavailable", "timeout", "official_profile_ready", "official_profile_unavailable") else "unknown")
     otp_read_states = {"readable", "unavailable", "permission", "app_not_running",
                        "multiple_instances", "read_timeout", "tree_limit", "ax_unavailable",
-                       "label_unavailable", "layout_unrecognized", "computed", "clock_waiting"}
-    otp_freshness_states = {"waiting_for_rollover", "waiting_for_valid_window", "verified", "unverified"}
+                       "label_unavailable", "layout_unrecognized", "computed", "clock_waiting", "source_readable"}
+    otp_freshness_states = {"waiting_for_rollover", "waiting_for_valid_window", "verified", "verified_source_unchanged", "unverified"}
     for key, allowed in (("otpCheckState", otp_read_states), ("otpFreshnessState", otp_freshness_states),
-                         ("otpProvider", {"offline_totp", "accessibility"}),
-                         ("offlineOTPCheckState", {"ready", "missing", "unavailable", "invalid", "binding_mismatch"}),
-                         ("backgroundOTPProbeResult", {"running", "waiting_for_lock", "verified_locked", "verified_unlocked_or_mixed", "unavailable"})):
+                         ("otpProvider", {"offline_totp", "accessibility", "official_local_binding"}),
+                         ("offlineOTPCheckState", {"ready", "missing", "unavailable", "invalid", "binding_mismatch", "source_unverified", "source_changed", "official_mismatch", "official_source_ready"}),
+                         ("officialOTPAlignmentState", {"matched_live", "verified_source_unchanged", "source_unverified", "source_changed", "official_mismatch", "unavailable", "invalid", "binding_mismatch", "fresh_official_source"}),
+                         ("backgroundOTPProbeResult", {"running", "waiting_for_lock", "verified_locked", "verified_unlocked_or_mixed", "unavailable"}),
+                         ("automaticCheckMode", {"login_expiry"})):
         state = value.get(key)
         out[key] = state if isinstance(state, str) and state in allowed else "unknown"
     for key in ("attemptsThisHour", "recoveryCount", "lockedOTPGenerationSamples", "confirmedRecoveryCount"):
         if type(value.get(key)) is int and 0 <= value[key] <= 1000000000:
             out[key] = value[key]
     for key in ("lastCheckStartedAt", "lastCheckCompletedAt", "lastProgressAt", "stateEnteredAt",
-                "stateDeadline", "nextCheckAt", "lastSubmissionAt", "manualControlUntil"):
+                "stateDeadline", "nextCheckAt", "lastSubmissionAt", "manualControlUntil", "lastSuccessfulLoginAt"):
         if number(value.get(key)) and value[key] >= 0:
             out[key] = value[key]
     for key in ("processGeneration", "episodeID", "attemptID"):
@@ -100,9 +102,14 @@ def snapshot_summary(path, now):
                "recovery_disabled", "permission_unavailable", "credential_missing", "network_unavailable",
                "authentication_budget_or_hold", "confirming_disconnect", "recovery_wait", "otp_unavailable",
                "authentication_in_progress", "manual_control", "network_path_unavailable",
-               "gateway_tcp_unreachable", "retry_backoff", "user_foreground_client", "verifying_otp", "waiting_tunnel"}
+               "gateway_tcp_unreachable", "retry_backoff", "user_foreground_client", "verifying_otp", "waiting_tunnel",
+               "closing_offline_client", "waiting_fresh_official_otp", "waiting_official_tunnel"}
     if isinstance(value.get("waitReason"), str) and value["waitReason"] in reasons:
         out["waitReason"] = value["waitReason"]
+    out["scheduled_idle"] = (out.get("automaticCheckMode") == "login_expiry"
+                             and number(value.get("nextCheckAt"))
+                             and value["nextCheckAt"] + SWIFT_EPOCH > now
+                             and value.get("recoveryBusy") is False)
     # Do not include title/detail, arbitrary paths, accounts, or any unknown fields.
     return out
 

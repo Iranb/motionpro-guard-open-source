@@ -51,7 +51,7 @@ enum Vault {
             let status = SecItemUpdate(q as CFDictionary, [kSecValueData as String: data] as CFDictionary)
             if status == errSecItemNotFound {
                 var add = q; add[kSecValueData as String] = data
-                add[kSecAttrLabel as String] = "MotionPro Guard — " + account
+                add[kSecAttrLabel as String] = "MotionPro Guard OSS — " + account
                 let result = SecItemAdd(add as CFDictionary, nil)
                 guard result == errSecSuccess else { throw GuardFailure.message("钥匙串保存失败（\(result)）") }
             } else if status != errSecSuccess { throw GuardFailure.message("钥匙串更新失败（\(status)）") }
@@ -152,7 +152,7 @@ enum Vault {
                 print 'Guard 已更新，请重新生成修复命令。'
                 exit 2
             fi
-            print 'MotionPro Guard：修复当前版本对校园 VPN 凭据的访问。'
+            print 'MotionPro Guard OSS：修复当前版本对校园 VPN 凭据的访问。'
             print '请在 Password: 后输入 Mac 登录钥匙串密码并按回车；输入不显示字符。'
             print '密码仅交给 macOS 自带的 security 工具，不保存、不传给 Guard。'
             \(commands.joined(separator: "\n"))
@@ -281,12 +281,23 @@ enum KeychainPartition {
 /// Static credentials are migrated to Keychain; this is not the guard's storage cipher.
 struct VendorCipher {
     private let key: Data
+    // Exact executable digests only. Both native clients were checked against
+    // EncryptPassword/DecryptPassword: AES-128-CBC, IV prefix, zero padding,
+    // with the key's VM address mapped to this file range. Never infer support
+    // from the app's version string (both report 1.0), size or architecture.
+    static let approvedClientKeyRanges: [String: Range<Int>] = [
+        "1fc77ba8f6c67919b4b3338a7236b8a7452e827a66789ca9b57b91f80a79dfac": 0x22b740..<0x22b750,
+        "8ae37da9e13cce1efaf985756ce45afead44fd8da460b1076523d98b907fa788": 0x22b740..<0x22b750
+    ]
+    static func verifiedKeyRange(digest: String, binarySize: Int) throws -> Range<Int> {
+        guard let range = approvedClientKeyRanges[digest], range.count == 16,
+              binarySize >= range.upperBound else { throw GuardFailure.unsupportedClient }
+        return range
+    }
     init() throws {
         let binary = try Data(contentsOf: URL(fileURLWithPath: "/Applications/MotionPro.app/Contents/MacOS/MotionPro"))
         let digest = SHA256.hash(data: binary).map { String(format: "%02x", $0) }.joined()
-        guard digest == "1fc77ba8f6c67919b4b3338a7236b8a7452e827a66789ca9b57b91f80a79dfac",
-              binary.count > 0x22b750 else { throw GuardFailure.unsupportedClient }
-        key = binary.subdata(in: 0x22b740..<0x22b750)
+        key = binary.subdata(in: try Self.verifiedKeyRange(digest: digest, binarySize: binary.count))
     }
     init(testKey: Data) { key = testKey }
     private func crypt(_ input: Data, iv: Data, operation: CCOperation) throws -> Data {

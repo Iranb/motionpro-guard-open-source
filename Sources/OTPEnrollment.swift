@@ -44,33 +44,77 @@ enum OTPEnrollment {
         return labels.count == 1 && readings.count == 1 ? readings[0] : nil
     }
 
+    /// Compare the existing Keychain token with the current official window.
+    /// Does not enroll, write credentials/profile/policy, or run recovery.
+    static func compareCurrent() async throws -> [String: Any] {
+        guard AXIsProcessTrusted(), LocalSession.unlocked else {
+            throw GuardFailure.message("实时比对需解锁桌面和已授权的官方 OTP 窗口；未进行登录")
+        }
+        var proof = OTPAlignmentProof(), clock = OfflineOTP.Clock()
+        var unreadable = 0
+        let deadline = ProcessInfo.processInfo.systemUptime + 75
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            guard LocalSession.unlocked else {
+                throw GuardFailure.message("桌面锁定，实时窗口比对已停止；未进行登录")
+            }
+            let token = try OfflineOTP.load()
+            let before = Date().timeIntervalSince1970
+            let uptime = ProcessInfo.processInfo.systemUptime
+            do { try clock.observe(wall: before, uptime: uptime) }
+            catch OfflineOTP.Failure.clockSettling {
+                try await Task.sleep(nanoseconds: 1_000_000_000); continue
+            }
+            if let observed = reference() {
+                let after = Date().timeIntervalSince1970
+                do {
+                    let expected = try token.reading(at: after)
+                    // Require margin from both edges, avoiding UI rollover lag.
+                    if observed.secondsRemaining >= 5 && expected.secondsRemaining >= 5 &&
+                       Double(token.period) - (after.truncatingRemainder(dividingBy: Double(token.period))) <= Double(token.period - 2) {
+                        proof.observe(matches: observed.code == expected.code, before: before, after: after, period: token.period)
+                    }
+                } catch OfflineOTP.Failure.clockBoundary { }
+            } else { unreadable += 1 }
+            if proof.verified || proof.mismatchingSamples > 0 { break }
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        return ["officialOTPAligned": proof.verified,
+                "matchingSamples": proof.matchingSamples, "mismatchingSamples": proof.mismatchingSamples,
+                "matchingPeriods": proof.periods.count, "unreadableWindowSamples": unreadable,
+                "noLogin": true, "noCredentialOrTokenWrite": true, "secretsEmitted": false]
+    }
+
     static func run(path: String) async throws -> Int {
         guard !LocalSession.isLocked, AXIsProcessTrusted() else {
             throw GuardFailure.message("首次导入需在解锁状态与官方口令核对；之后的后台计算不依赖此权限")
         }
         let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
-        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-        guard attributes[.type] as? FileAttributeType == .typeRegular,
-              (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
-              (attributes[.size] as? NSNumber)?.intValue ?? Int.max <= 1_048_576
-        else { throw OfflineOTP.Failure.invalid }
         let username = try OfflineOTP.profileUsername()
-        let candidate = try OfflineOTP.candidate(data: Data(contentsOf: url), username: username)
+        let candidate = try OfflineOTP.candidate(data: OfflineOTP.sourceData(path: url.path), username: username)
         let deadline = ProcessInfo.processInfo.systemUptime + 75
-        var matchedPeriods: Set<UInt64> = [], matches = 0
+        var proof = OTPAlignmentProof(), clock = OfflineOTP.Clock()
         while ProcessInfo.processInfo.systemUptime < deadline {
             guard !LocalSession.isLocked else { throw GuardFailure.message("首次口令核对被锁屏中断；没有保存令牌") }
-            if let reference = reference(), let generated = try? candidate.reading(at: Date().timeIntervalSince1970) {
-                guard reference.code == generated.code else { throw GuardFailure.message("计算结果与官方口令不一致；没有保存令牌") }
-                matchedPeriods.insert(UInt64(floor(Date().timeIntervalSince1970 / Double(candidate.period))))
-                matches += 1
-                if matchedPeriods.count >= 2 && matches >= 4 {
+            let before = Date().timeIntervalSince1970
+            do { try clock.observe(wall: before, uptime: ProcessInfo.processInfo.systemUptime) }
+            catch OfflineOTP.Failure.clockSettling { try await Task.sleep(nanoseconds: 1_000_000_000); continue }
+            if let reference = reference() {
+                let after = Date().timeIntervalSince1970
+                if let generated = try? candidate.reading(at: after), reference.secondsRemaining >= 5,
+                   generated.secondsRemaining >= 5, after.truncatingRemainder(dividingBy: Double(candidate.period)) >= 2 {
+                    proof.observe(matches: reference.code == generated.code, before: before, after: after, period: candidate.period)
+                }
+                guard proof.mismatchingSamples == 0 else { throw OfflineOTP.Failure.officialMismatch }
+                if proof.verified {
                     guard try OfflineOTP.profileUsername() == username else { throw OfflineOTP.Failure.binding }
-                    let token = OfflineOTP.Token(version: candidate.version, host: candidate.host, username: username,
+                    let current = try OfflineOTP.candidate(data: OfflineOTP.sourceData(path: url.path), username: username)
+                    guard candidate.matchesSource(current) else { throw OfflineOTP.Failure.sourceChanged }
+                    var token = OfflineOTP.Token(version: candidate.version, host: candidate.host, username: username,
                         seed: candidate.seed, period: candidate.period, clockUncertainty: candidate.clockUncertainty,
-                        verifiedAt: Date(), verifiedPeriods: matchedPeriods.count)
+                        verifiedAt: Date(), verifiedPeriods: proof.periods.count)
+                    token.sourcePath = url.path
                     try Vault.put(JSONEncoder().encode(token), account: OfflineOTP.account)
-                    return matchedPeriods.count
+                    return proof.periods.count
                 }
             }
             try await Task.sleep(nanoseconds: 1_000_000_000)

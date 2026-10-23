@@ -9,9 +9,9 @@ struct GuardProvider: TimelineProvider {
     func placeholder(in context: Context) -> GuardEntry { .init(date: Date(), snapshot: .placeholder) }
     func read() -> GuardSnapshot {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let url = root.appendingPathComponent("MotionProGuard/status.json")
+        let url = root.appendingPathComponent("MotionProGuardOSS/status.json")
         guard let data = try? Data(contentsOf: url), let snapshot = try? JSONDecoder().decode(GuardSnapshot.self, from: data) else {
-            var missing = GuardSnapshot(); missing.title = "打开监控应用"; missing.detail = "启动 MotionPro Guard 后显示状态"; return missing
+            var missing = GuardSnapshot(); missing.title = "打开监控应用"; missing.detail = "启动 MotionPro Guard OSS 后显示状态"; return missing
         }
         return snapshot
     }
@@ -20,7 +20,10 @@ struct GuardProvider: TimelineProvider {
         let now = Date(), snapshot = read()
         let expirations = Set((snapshot.recentReconnectionDates ?? []).map { $0.addingTimeInterval(ReconnectHistory.window) }.filter { $0 > now }).sorted()
         let entries = ([now] + expirations).map { GuardEntry(date: $0, snapshot: snapshot) }
-        completion(Timeline(entries: entries, policy: .after(now.addingTimeInterval(60))))
+        let refresh = snapshot.automaticCheckMode == LoginExpirySchedule.mode
+            ? max(snapshot.nextCheckAt ?? now.addingTimeInterval(86_400), now.addingTimeInterval(60))
+            : now.addingTimeInterval(60)
+        completion(Timeline(entries: entries, policy: .after(refresh)))
     }
 }
 
@@ -29,7 +32,9 @@ struct GuardWidgetView: View {
     @Environment(\.widgetFamily) var family
     var s: GuardSnapshot { entry.snapshot }
     var color: Color { s.state == "connected" ? .green : (s.state == "recovering" ? .blue : .secondary) }
-    var stale: Bool { entry.date.timeIntervalSince(s.updatedAt) > 180 }
+    var scheduled: Bool { s.automaticCheckMode == LoginExpirySchedule.mode && (s.nextCheckAt ?? .distantPast) > entry.date }
+    var stale: Bool { !scheduled && entry.date.timeIntervalSince(s.updatedAt) > 180 }
+    var title: String { scheduled ? "定时恢复" : (stale ? "等待更新" : s.title) }
     var reconnectCount: String { s.reconnectionCount(at: entry.date).map(String.init) ?? "—" }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -39,8 +44,8 @@ struct GuardWidgetView: View {
                 Circle().fill(stale ? Color.secondary : color).frame(width: 6, height: 6)
             }
             if family == .systemSmall {
-                Text(stale ? "等待更新" : s.title).font(.system(size: 23, weight: .semibold, design: .rounded)).lineLimit(1).minimumScaleFactor(0.75)
-                Text("VPN 网络").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(title).font(.system(size: 23, weight: .semibold, design: .rounded)).lineLimit(1).minimumScaleFactor(0.75)
+                Text("校园 VPN").font(.system(size: 11)).foregroundStyle(.secondary)
                 HStack {
                     Text("72h 内重连").font(.system(size: 10)).foregroundStyle(.secondary)
                     Spacer()
@@ -49,7 +54,7 @@ struct GuardWidgetView: View {
             } else {
                 HStack(alignment: .center, spacing: 16) {
                     VStack(alignment: .leading, spacing: 5) {
-                        Text(stale ? "等待更新" : s.title).font(.system(size: 29, weight: .semibold, design: .rounded)).lineLimit(1).minimumScaleFactor(0.75)
+                        Text(title).font(.system(size: 29, weight: .semibold, design: .rounded)).lineLimit(1).minimumScaleFactor(0.75)
                         Text(s.detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
                     }
                     Spacer(minLength: 0)
@@ -77,7 +82,7 @@ struct GuardWidgetView: View {
 struct MotionProGuardWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: GuardIdentity.widgetKind, provider: GuardProvider()) { GuardWidgetView(entry: $0) }
-            .configurationDisplayName("MotionPro Guard")
+            .configurationDisplayName("MotionPro Guard OSS")
             .description("查看校园 VPN 状态、72 小时成功重连次数与自动恢复是否就绪。")
             .supportedFamilies([.systemSmall, .systemMedium])
     }

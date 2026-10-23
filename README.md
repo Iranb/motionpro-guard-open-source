@@ -1,45 +1,43 @@
 # MotionPro Guard OSS
 
-macOS 上的 MotionPro VPN 自动恢复助手，包含后台程序和原生桌面小组件。**当前版本：1.6.1。** 默认记录最近成功登录时间，在 **24 小时加 2 分钟**后检查一次，确认已断开才重新登录；平时不轮询 VPN。
+An automatic recovery helper for MotionPro VPN on macOS, with a background app and a native desktop widget. **Current version: 1.6.1.** By default, it records the last successful login and checks the connection once **24 hours and 2 minutes** later. It reconnects only after confirming that the VPN is disconnected. It does not poll the VPN between scheduled checks.
 
-使用官方 MotionPro 已保存的静态密码，每次登录重新读取本机 MotionProOTP 当前绑定来计算口令。默认流程不需要 OTP 窗口或 Guard 的旧钥匙串副本，也不需要模型 API。
+Guard uses the static password saved by the official MotionPro client. For each login, it reads the current local MotionProOTP binding and calculates a one-time password (OTP). The default flow does not require the OTP window, an old copy of credentials in Guard's Keychain, or a model API.
 
-**许可证：GNU GPL v3 或更新版本（GPL-3.0-or-later）。** 许可证全文见 [LICENSE](LICENSE)。这是独立社区工具；MotionPro、MotionProOTP 和厂商库属于各自权利人，不包含在仓库和源码包内。
+**License: GNU GPL v3 or later (GPL-3.0-or-later).** See [LICENSE](LICENSE) for the full text. This is an independent community tool distributed as source code. MotionPro, MotionProOTP, and vendor libraries belong to their respective rights holders and are not included in this repository or its source archives.
 
-This source-only macOS helper schedules recovery from the last successful VPN login. It reuses the official client's saved password and current local OTP binding. Vendor applications, personal credentials, signing material, and runtime records are not distributed.
-
-## 工作方式
+## How it works
 
 ```mermaid
 flowchart TD
-    A[记录成功登录时间] --> B[等待 24 小时加 2 分钟]
-    B --> C{读取厂商实时状态}
-    C -->|仍然连接| D[保留连接，安排下一天]
+    A[Record successful login time] --> B[Wait 24 hours and 2 minutes]
+    B --> C{Read live vendor status}
+    C -->|Still connected| D[Keep connection and schedule next day]
     D --> B
-    C -->|切换中| E[有界等待，避免并行登录]
+    C -->|Transition in progress| E[Wait with a time limit to avoid parallel logins]
     E --> C
-    C -->|持续离线约 30 秒| F[检查官方密码、当前令牌、网络与共享预算]
-    F --> G[正常关闭离线客户端，准备新 OTP]
-    G --> H[启动官方 MotionPro 一次，最多等待 180 秒]
-    H -->|成功| A
-    H -->|失败或阻塞| I[保存结果并显示原因]
+    C -->|Disconnected for about 30 seconds| F[Check saved password, current token, network, and shared attempt budget]
+    F --> G[Quit disconnected client normally and prepare fresh OTP]
+    G --> H[Launch official MotionPro once and wait up to 180 seconds]
+    H -->|Success| A
+    H -->|Failure or blocker| I[Save result and show reason]
 ```
 
-- 新成功登录更新计时起点。到期仍在线则安排下一天；未知状态不重启。启动和点击“立即检查”可以进行一次检查。
-- 提前意外断线无法即时发现。24 小时是本策略的预期时长，不保证服务器一定在该时刻断开。
-- 自动与人工备用提交共用滚动一小时最多两次的预算；连续两次已提交失败暂停。前置检查或等待不增加提交次数。
-- launchd 保持 Guard 运行；看护助手无周期触发。不自动创建助手定时检查任务。
-- 原生小组件显示“定时恢复”；点击后可查看上次成功登录和下次恢复时间。计划等待期间的旧快照不能当作实时隧道状态。
+- Each successful login resets the schedule. If the VPN is still connected when the check is due, Guard schedules the next day. Unknown states do not trigger a restart. Starting Guard or clicking **Check now** (`立即检查`) also runs a check.
+- Unexpected disconnections before the scheduled time are not detected immediately. The 24-hour interval is an expected session duration, not a guarantee that the server will disconnect at that time.
+- Automatic and manual fallback logins share a limit of two submissions per rolling hour. Two consecutive submitted failures pause recovery. Readiness checks and waiting do not count as submissions.
+- `launchd` keeps Guard running. The watchdog helper has no periodic trigger. Installation does not create a scheduled task for an AI assistant.
+- The native widget shows **Scheduled recovery** (`定时恢复`). Click it to view the last successful login and the next recovery time. A saved snapshot during the waiting period is not live tunnel status.
 
-详细顺序、事务恢复和成功标准见 [架构](docs/architecture.md) 与 [验收](docs/acceptance.md)。
+See [Architecture](docs/architecture.md) and [Acceptance criteria](docs/acceptance.md) for the detailed sequence, interrupted-attempt recovery, and success criteria. The linked guides are currently in Chinese.
 
-## 构建和安装
+## Build and install
 
-需要 macOS 14+、Xcode Command Line Tools、Python 3，以及自己合法安装和配置的官方 MotionPro/MotionProOTP。
+Requirements: macOS 14 or later, Xcode Command Line Tools, Python 3, and your own legally installed and configured copies of MotionPro and MotionProOTP. The app UI is currently in Chinese; exact button labels are included below.
 
-1. 先用官方客户端手动登录一次，保存静态密码，并将目标 VPN 设为默认站点。每台电脑单独绑定自己的 OTP。
-2. 将 [project.example.json](project.example.json) 复制为 `project.local.json`，只填写自己的网关主机名，不填写账号或秘密。
-3. 使用自己的持久代码签名身份构建和安装：
+1. Log in manually once with the official client, save the static password, and set the target VPN as the default site. Bind an OTP token separately on each computer.
+2. Copy [project.example.json](project.example.json) to `project.local.json`. Set your gateway hostname without adding an account name or secrets.
+3. Build and install with your own persistent code-signing identity:
 
    ```bash
    python3 build.py --config project.local.json --signing-identity YOUR_CERTIFICATE_SHA1
@@ -48,14 +46,14 @@ flowchart TD
    open -a "$HOME/Applications/MotionPro Guard OSS.app" 'motionpro-guard-oss://open'
    ```
 
-4. 在管理页点击“选择官方 OTP 数据源”，选择本机已绑定的 `VSite.plist`。点击“检查登录条件”和“立即检查”，确认已记录成功登录时间，再开启“预计到期后自动恢复”。
-5. 右键桌面 → 编辑小组件 → 搜索 **MotionPro Guard OSS**。
+4. In the management window, click **Choose official OTP source** (`选择官方 OTP 数据源`) and select the local `VSite.plist` for your bound token. Click **Check login readiness** (`检查登录条件`) and **Check now** (`立即检查`). Confirm that a successful login time is recorded, then enable **Recover automatically after expected expiry** (`预计到期后自动恢复`).
+5. Right-click the desktop, select **Edit Widgets**, and search for **MotionPro Guard OSS**.
 
-首次安装默认关闭自动恢复。公开版使用独立标识 `org.motionproguard.app`、数据目录 `MotionProGuardOSS` 和 URL scheme `motionpro-guard-oss`；不会替换已有 Guard。不要同时运行两套恢复引擎。
+Automatic recovery is disabled on first installation. The public edition uses the separate bundle identifier `org.motionproguard.app`, data directory `MotionProGuardOSS`, and URL scheme `motionpro-guard-oss`. It does not replace an existing Guard installation. Do not run two recovery engines at the same time.
 
-完整设置、系统授权和安装边界见 [安装说明](docs/setup.md)。
+See the [Setup guide](docs/setup.md) (Chinese) for full configuration, macOS permissions, and installation details.
 
-## 源码检查
+## Build and test from source
 
 ```bash
 python3 build.py --ad-hoc
@@ -63,27 +61,27 @@ python3 -m unittest discover -s Tests -p 'test_*.py'
 python3 scripts/release_audit.py
 ```
 
-`--ad-hoc` 只构建开发产物并运行合成测试，不安装、启动或登录。正式安装要求使用者自己的持久证书；不提供原作者证书、私钥或预签名应用。
+`--ad-hoc` builds development artifacts and runs synthetic tests. It does not install or launch the app, or submit a VPN login. Installation requires your own persistent signing certificate. The author's certificate, private key, and pre-signed applications are not provided.
 
 ```bash
-# 只运行 Swift 合成测试
+# Run only the Swift synthetic tests
 python3 build.py --test-only
-# 用户明确要求实时状态时才执行
+# Run only when the user explicitly requests a live status check
 python3 scripts/preflight.py
 python3 scripts/manual_attempt.py status
 ```
 
-可复用 Codex skill 位于 [skills/motionpro-vpn-access](skills/motionpro-vpn-access/SKILL.md)。可选人工备用模板位于 [automation](automation/README.md)，需要使用者单独配置和授权，不随安装启用。
+The reusable Codex skill is in [skills/motionpro-vpn-access](skills/motionpro-vpn-access/SKILL.md). Optional manual fallback templates are in [automation](automation/README.md). They require separate configuration and authorization and are not enabled during installation. These guides are currently in Chinese.
 
-## 限制与验证范围
+## Limitations and validation status
 
-- 配置加解密只接受源码中固定的两种已核对客户端构建；不匹配时停止。源代码不包含厂商密钥或二进制。见 [兼容性](docs/compatibility.md)。
-- 锁屏时的后台取码和定时触发已实现；**新版完整锁屏重连和公开版在新设备上的自然周期恢复仍需实测**。合成测试或原本机的单次登录成功不能代替这项验收。
-- 休眠、关机和未登录桌面时不会执行；唤醒后再处理到期计划。提前断线需要用户主动检查。
-- 日志无法提供可信成功时间时，不虚构计时起点。VPN 隧道恢复也不代表 SSH/HPC 会话或业务认证已经恢复。
+- Configuration encryption and decryption support only the two verified client builds identified in the source. Guard stops on a mismatch. Vendor keys and binaries are not included. See [Compatibility](docs/compatibility.md) (Chinese).
+- Background OTP generation and scheduled triggering while the screen is locked are implemented. **A complete locked-screen reconnect with the current version, and recovery after a naturally expired session on a fresh public-edition installation, still require live testing.** Synthetic tests and a single successful login on the original machine do not establish either result.
+- Guard does not run while the Mac is asleep, shut down, or logged out. It handles overdue checks after waking. Early disconnections require a user-initiated check.
+- If logs cannot provide a trustworthy successful login time, Guard does not invent a schedule anchor. Restoring the VPN tunnel does not restore SSH/HPC sessions or application authentication.
 
-## 发布内容
+## Distribution
 
-仓库包含源码、合成测试、构建安装工具、脱敏诊断和迁移文档。排除账号密码、OTP 种子与口令、官方配置、钥匙串、个人路径、证书指纹、真实日志、运行状态和恢复备份。
+This repository includes source code, synthetic tests, build and installation tools, sanitized diagnostics, and migration documentation. It excludes account credentials, OTP seeds and codes, official client configurations, Keychains, personal paths, certificate fingerprints, real logs, runtime state, and recovery backups.
 
-[更新记录](CHANGELOG.md) · [安全说明](SECURITY.md)
+[Changelog](CHANGELOG.md) · [Security](SECURITY.md) (Chinese)

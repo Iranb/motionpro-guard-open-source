@@ -31,6 +31,29 @@ import Foundation
         check(restored.raw(section: "other", key: "setting") == "unchanged", "unrelated settings stay untouched")
         let again = try decoded.restored(restored, cipher: cipher)
         check(again.text == restored.text, "interrupted cleanup can be repeated")
+        let enabledOriginals = OfficialProfile.Transaction(ini_path: VendorProfile.url.path, prefix: prefix,
+            originals: ["password2": originalSecond, "autoconnect": "true", "reconn_sess_invalid": "0"],
+            injected: transaction.injected, sections: transaction.sections, created: 1234, phase: "connected_observed")
+        var disabled = ini
+        disabled.set(section: "global", key: "autoconnect", raw: "false")
+        disabled.set(section: "profiles", key: prefix + "reconn_sess_invalid", raw: "1")
+        disabled.set(section: "profiles", key: prefix + "password2", raw: "\"" + (try cipher.encrypt("222222")) + "\"")
+        let reconciled = try enabledOriginals.restored(disabled, cipher: cipher)
+        check(reconciled.raw(section: "global", key: "autoconnect") == "false", "cleanup preserves a disabled auto-connect setting")
+        check(reconciled.raw(section: "profiles", key: prefix + "reconn_sess_invalid") == "1", "cleanup preserves invalid-session handling")
+        check(reconciled.raw(section: "profiles", key: prefix + "password2") == originalSecond, "disabled controls do not prevent cleanup of a re-encrypted injected OTP")
+        check(reconciled.raw(section: "profiles", key: prefix + "password") == staticPassword, "reconciliation keeps the saved static password")
+        check(try enabledOriginals.restored(reconciled, cipher: cipher).text == reconciled.text, "reconciled cleanup is repeatable")
+        for (key, section, raw) in [("autoconnect", "global", "unexpected"), ("reconn_sess_invalid", "profiles", "2")] {
+            var unsupported = ini
+            unsupported.set(section: section, key: section == "profiles" ? prefix + key : key, raw: raw)
+            do { _ = try enabledOriginals.restored(unsupported, cipher: cipher); preconditionFailure("unknown control values must retain the transaction") }
+            catch { checks += 1 }
+        }
+        var changedSecret = disabled
+        changedSecret.set(section: "profiles", key: prefix + "password2", raw: "\"" + (try cipher.encrypt("333333")) + "\"")
+        do { _ = try enabledOriginals.restored(changedSecret, cipher: cipher); preconditionFailure("disabled controls must not hide a changed OTP") }
+        catch { checks += 1 }
         ini.set(section: "profiles", key: prefix + "password2", raw: "\"" + (try cipher.encrypt("222222")) + "\"")
         check(try decoded.restored(ini, cipher: cipher).raw(section: "profiles", key: prefix + "password2") == originalSecond,
               "Qt re-encryption of the same OTP can be restored")

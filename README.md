@@ -1,6 +1,6 @@
 # MotionPro Guard OSS
 
-An automatic recovery helper for MotionPro VPN on macOS, with a background app and a native desktop widget. **Current version: 1.6.1.** By default, it records the last successful login and checks the connection once **24 hours and 2 minutes** later. It reconnects only after confirming that the VPN is disconnected. It does not poll the VPN between scheduled checks.
+An automatic recovery helper for MotionPro VPN on macOS, with a background app and a native desktop widget. **Current version: 1.6.5.** Guard listens for MotionPro log events and system network changes. It confirms a disconnection for about 30 seconds before reconnecting. Idle monitoring does not poll VPN status at a fixed interval.
 
 Guard uses the static password saved by the official MotionPro client. For each login, it reads the current local MotionProOTP binding and calculates a one-time password (OTP). The default flow does not require the OTP window, an old copy of credentials in Guard's Keychain, or a model API.
 
@@ -10,26 +10,27 @@ Guard uses the static password saved by the official MotionPro client. For each 
 
 ```mermaid
 flowchart TD
-    A[Record successful login time] --> B[Wait 24 hours and 2 minutes]
-    B --> C{Read live vendor status}
-    C -->|Still connected| D[Keep connection and schedule next day]
-    D --> B
-    C -->|Transition in progress| E[Wait with a time limit to avoid parallel logins]
-    E --> C
-    C -->|Disconnected for about 30 seconds| F[Check saved password, current token, network, and shared attempt budget]
+    A[Native log or network event, startup, or wake] --> B[Read live vendor status]
+    C[Last successful login plus 24 hours and 2 minutes] --> B
+    B -->|Connected| D[Keep connection and arm expiry fallback]
+    D --> C
+    B -->|Transition or temporarily unreadable| E[Recheck within a bounded observation window]
+    E --> B
+    B -->|Disconnected for about 30 seconds| F[Check password, current token, network, and shared budget]
     F --> G[Quit disconnected client normally and prepare fresh OTP]
-    G --> H[Launch official MotionPro once and wait up to 180 seconds]
-    H -->|Success| A
+    G --> H[Launch official MotionPro once and wait for tunnel]
+    H -->|Confirmed success| D
     H -->|Failure or blocker| I[Save result and show reason]
 ```
 
-- Each successful login resets the schedule. If the VPN is still connected when the check is due, Guard schedules the next day. Unknown states do not trigger a restart. Starting Guard or clicking **Check now** (`立即检查`) also runs a check.
-- Unexpected disconnections before the scheduled time are not detected immediately. The 24-hour interval is an expected session duration, not a guarantee that the server will disconnect at that time.
-- Automatic and manual fallback logins share a limit of two submissions per rolling hour. Two consecutive submitted failures pause recovery. Readiness checks and waiting do not count as submissions.
+- Native notifications request a live status check. They do not authorize a login on their own. Guard coalesces event bursts and observes for up to 180 seconds, with status checks about 10 seconds apart. Unknown status never counts toward the 30-second disconnection requirement. A known desktop-only mode stops the observation.
+- A successful login also schedules a fallback check **24 hours and 2 minutes** later. If the VPN is still connected, Guard preserves it and schedules the next day. This interval is an expected session duration, not a server guarantee.
+- Automatic and manual fallback logins share a default limit of two submissions per rolling hour. Two consecutive submitted failures pause recovery. Readiness checks and waiting do not count as submissions. A time-limited, explicitly authorized test grant allows one extra submission, is consumed by the next Guard submission, and retains history and failure protection. First installation has no such grant.
+- Pause recovery or take manual control before deliberately disconnecting. An enabled Guard can recover from a manual disconnection too. It waits while you operate the client in the foreground on an unlocked desktop.
 - `launchd` keeps Guard running. The watchdog helper has no periodic trigger. Installation does not create a scheduled task for an AI assistant.
-- The native widget shows **Scheduled recovery** (`定时恢复`). Click it to view the last successful login and the next recovery time. A saved snapshot during the waiting period is not live tunnel status.
+- The native widget shows **Disconnect recovery** (`断线自恢复`) when recovery is enabled, the last observed state is connected, and at least one native listener started. Errors and holds take display priority. **Expiry fallback check** (`到期补充检查`) shows the backup schedule. A saved snapshot is not live tunnel status.
 
-See [Architecture](docs/architecture.md) and [Acceptance criteria](docs/acceptance.md) for the detailed sequence, interrupted-attempt recovery, and success criteria. The linked guides are currently in Chinese.
+See [Architecture](docs/architecture.md) and [Acceptance criteria](docs/acceptance.md) for state handling, interrupted-attempt recovery, and success criteria. The linked guides are currently in Chinese.
 
 ## Build and install
 
@@ -46,12 +47,12 @@ Requirements: macOS 14 or later, Xcode Command Line Tools, Python 3, and your ow
    open -a "$HOME/Applications/MotionPro Guard OSS.app" 'motionpro-guard-oss://open'
    ```
 
-4. In the management window, click **Choose official OTP source** (`选择官方 OTP 数据源`) and select the local `VSite.plist` for your bound token. Click **Check login readiness** (`检查登录条件`) and **Check now** (`立即检查`). Confirm that a successful login time is recorded, then enable **Recover automatically after expected expiry** (`预计到期后自动恢复`).
+4. In the management window, click **Choose official OTP source** (`选择官方 OTP 数据源`) and select the local `VSite.plist` for your bound token. Click **Check login readiness** (`检查登录条件`) and **Check now** (`立即检查`). Confirm readiness, then enable **Recover after disconnection** (`断线后自动恢复`). A trustworthy successful-login time also enables the expiry fallback.
 5. Right-click the desktop, select **Edit Widgets**, and search for **MotionPro Guard OSS**.
 
 Automatic recovery is disabled on first installation. The public edition uses the separate bundle identifier `org.motionproguard.app`, data directory `MotionProGuardOSS`, and URL scheme `motionpro-guard-oss`. It does not replace an existing Guard installation. Do not run two recovery engines at the same time.
 
-See the [Setup guide](docs/setup.md) (Chinese) for full configuration, macOS permissions, and installation details.
+See the [Setup guide](docs/setup.md) (Chinese) for full configuration, macOS permissions, and installation details. The installer supports first installation and refuses to overwrite an existing app; existing installations need a coordinated upgrade that preserves local settings, pending transactions, and attempt history.
 
 ## Build and test from source
 
@@ -61,7 +62,7 @@ python3 -m unittest discover -s Tests -p 'test_*.py'
 python3 scripts/release_audit.py
 ```
 
-`--ad-hoc` builds development artifacts and runs synthetic tests. It does not install or launch the app, or submit a VPN login. Installation requires your own persistent signing certificate. The author's certificate, private key, and pre-signed applications are not provided.
+`--ad-hoc` builds development artifacts and runs synthetic tests, including native file notifications on temporary fixtures. It does not install or launch the app, or submit a VPN login. Installation requires your own persistent signing certificate. The author's certificate, private key, and pre-signed applications are not provided.
 
 ```bash
 # Run only the Swift synthetic tests
@@ -76,9 +77,10 @@ The reusable Codex skill is in [skills/motionpro-vpn-access](skills/motionpro-vp
 ## Limitations and validation status
 
 - Configuration encryption and decryption support only the two verified client builds identified in the source. Guard stops on a mismatch. Vendor keys and binaries are not included. See [Compatibility](docs/compatibility.md) (Chinese).
-- Background OTP generation and scheduled triggering while the screen is locked are implemented. **A complete locked-screen reconnect with the current version, and recovery after a naturally expired session on a fresh public-edition installation, still require live testing.** Synthetic tests and a single successful login on the original machine do not establish either result.
-- Guard does not run while the Mac is asleep, shut down, or logged out. It handles overdue checks after waking. Early disconnections require a user-initiated check.
-- If logs cannot provide a trustworthy successful login time, Guard does not invent a schedule anchor. Restoring the VPN tunnel does not restore SSH/HPC sessions or application authentication.
+- **A 1.6.5 candidate passed one event-driven reconnect on a separate test Mac after a manually induced disconnection.** The same Guard process detected the network event, submitted one official-client login while locked, confirmed attribution, and restored the tunnel. Independent observations then showed at least 60 seconds of stable connection, with a maximum sampling gap of about 12 seconds. The one-time test grant was consumed and prior history was preserved.
+- That test used local configuration and signing. Authentication on a fresh public-edition installation and recovery after a naturally expired 24-hour session remain unverified. One successful recovery does not establish long-term reliability. See [Acceptance criteria](docs/acceptance.md).
+- Guard runs in a logged-in macOS session. It does not recover while the Mac is asleep, shut down, or logged out; waking requests a new check. Listener readiness means at least one notification source started, not that every notification source works on every machine.
+- If logs cannot provide a trustworthy successful-login time, Guard does not invent an expiry anchor. Native events can still trigger checks. Restoring the VPN tunnel does not restore SSH/HPC sessions or application authentication; those require separate verification.
 
 ## Distribution
 

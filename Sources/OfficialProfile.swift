@@ -59,6 +59,11 @@ enum OfficialProfile {
                     Self.sameSecret(current, injected[key], cipher: cipher)
                 if current == injected[key] || equivalent {
                     output.set(section: section, key: actual, raw: original)
+                } else if (key == "autoconnect" && injected[key] == "true" && current == "false") ||
+                          (key == "reconn_sess_invalid" && injected[key] == "0" && current == "1") {
+                    // Preserve later changes to the client connection controls.
+                    // Clearing a temporary OTP must not revert current preferences.
+                    continue
                 } else if current != original {
                     throw GuardFailure.message("客户端配置已改变；保留恢复记录，未提交登录")
                 }

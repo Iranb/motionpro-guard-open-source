@@ -24,7 +24,8 @@ enum RecoveryPolicyDisk {
         }
         for key in ["enabled","submissions","consecutiveFailures","lastSuccess","successCount","manualHold",
                     "manualControlUntil","confirmedSuccessCount","lockedSuccessDates","pendingHeadlessAttempt",
-                    "pendingOfficialAttempt","recoveryBackend","lastSuccessfulLoginAt","lastScheduledEvaluationAt"] { object.removeValue(forKey: key) }
+                    "pendingOfficialAttempt","recoveryBackend","lastSuccessfulLoginAt","lastScheduledEvaluationAt",
+                    "oneTimeHourlyLimitOverrideUntil"] { object.removeValue(forKey: key) }
         let owned = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as! [String: Any]
         object.merge(owned, uniquingKeysWith: { _, new in new })
         let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])

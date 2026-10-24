@@ -1,4 +1,13 @@
-# 更新记录
+# Changelog
+
+## 1.6.5
+
+- Recover from native MotionPro log and system network events without periodic idle status polling. Keep the login-expiry check as a fallback.
+- Coalesce event bursts, confirm known disconnection for about 30 seconds, and retain the bounded observation window when vendor status is temporarily unreadable. Unknown and desktop-only states never authorize login.
+- Preserve later client control settings when cleaning up a temporary OTP. Keep the saved static password unchanged, and retain transactions on unsupported changes or credential conflicts.
+- Show disconnect recovery and the expiry fallback in the widget, with errors and holds taking priority.
+- Support an expiring, explicitly authorized single-use hourly test grant. Consume it durably on the next Guard submission while preserving history, manual control, and consecutive-failure protection.
+- Add native file-event, observation-window, transaction, widget, and budget tests. A locally configured 1.6.5 candidate completed one locked-screen event recovery on a separate Mac with one submission and at least 60 seconds of stable tunnel observations. Natural session expiry and fresh public-edition authentication still require validation.
 
 ## 1.6.1
 

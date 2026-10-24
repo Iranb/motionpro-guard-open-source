@@ -29,6 +29,22 @@ import Foundation
         policy.succeeded(now: recentLogin)
         check(policy.lastSuccessfulLoginAt == recentLogin, "confirmed tunnel success rearms from the new login")
         check(LoginExpirySchedule.next(lastLogin: policy.lastSuccessfulLoginAt, evaluatedAt: first) == recentLogin.addingTimeInterval(86_520), "old evaluation does not delay a new session")
+        var snapshot = GuardSnapshot()
+        snapshot.updatedAt = login; snapshot.automaticCheckMode = LoginExpirySchedule.mode
+        snapshot.nextCheckAt = first.addingTimeInterval(86_400)
+        snapshot.state = "attention"; snapshot.title = "自动登录待检查"
+        check(snapshot.widgetTitle(at: first) == snapshot.title, "a future schedule must not hide a recovery error")
+        snapshot.nextCheckAt = first.addingTimeInterval(-10)
+        check(snapshot.widgetTitle(at: first) == snapshot.title, "a stale snapshot must retain the recovery error")
+        snapshot.state = "connected"
+        snapshot.nextCheckAt = first.addingTimeInterval(86_400)
+        check(snapshot.widgetTitle(at: first) == "定时恢复", "scheduled idle state stays visible without polling")
+        snapshot.nextCheckAt = nil
+        check(snapshot.widgetTitle(at: first) == "等待更新", "ordinary stale snapshots still require an update")
+        snapshot.connectionEventsReady = true
+        check(snapshot.widgetTitle(at: first) == "断线自恢复", "active event monitoring is visible during a connected idle period")
+        snapshot.state = "attention"
+        check(snapshot.widgetTitle(at: first) == snapshot.title, "event monitoring does not hide a recovery blocker")
         print("Login schedule checks passed: \(count)")
     }
 }

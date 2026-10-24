@@ -53,6 +53,17 @@ class StatusTests(unittest.TestCase):
             self.assertEqual(result["lastSuccessfulLoginAt"], anchor)
             self.assertNotIn("otp", result)
 
+    def test_event_monitor_readiness_and_known_vendor_mode(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "status.json"
+            path.write_text(json.dumps({"connectionEventsReady": True,
+                                        "waitReason": "vendor_mode_not_tunnel"}))
+            result = preflight.snapshot_summary(path, 2000000000.0)
+            self.assertTrue(result["connectionEventsReady"])
+            self.assertEqual(result["waitReason"], "vendor_mode_not_tunnel")
+            path.write_text(json.dumps({"connectionEventsReady": "untrusted text"}))
+            self.assertIsNone(preflight.snapshot_summary(path, 2000000000.0)["connectionEventsReady"])
+
     def test_connected_exit_status_parser(self):
         self.assertEqual(preflight.parse_status("VPN status:2\n"), 2)
 

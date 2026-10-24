@@ -142,6 +142,20 @@ import Foundation
         completed.pendingOfficialAttempt = nil
         try RecoveryPolicyDisk.write(completed, root: root)
         check(try RecoveryPolicyDisk.read(root: root).pendingOfficialAttempt == nil, "completed official reservation cannot reappear after restart")
+        var granted = RecoveryPolicy()
+        let grantTime = Date()
+        try granted.submit(now: grantTime.addingTimeInterval(-20))
+        try granted.submit(now: grantTime.addingTimeInterval(-10))
+        granted.oneTimeHourlyLimitOverrideUntil = grantTime.addingTimeInterval(600)
+        try RecoveryPolicyDisk.write(granted, root: root)
+        var reserved = try RecoveryPolicyDisk.read(root: root)
+        check(reserved.allowed(now: grantTime), "the disk policy retains an authorized unspent test grant")
+        try reserved.submit(now: grantTime)
+        try RecoveryPolicyDisk.write(reserved, root: root)
+        let consumed = try RecoveryPolicyDisk.read(root: root)
+        check(consumed.oneTimeHourlyLimitOverrideUntil == nil && consumed.submissions.count == 3,
+              "durable reservation consumes the grant and retains all three submissions")
+        check(!consumed.allowed(now: grantTime.addingTimeInterval(1)), "metadata merge cannot resurrect the consumed test grant")
         print("Headless tests passed: \(passed)")
     }
 }

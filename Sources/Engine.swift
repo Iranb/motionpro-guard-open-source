@@ -267,6 +267,9 @@ final class GuardEngine: ObservableObject {
     @Published var probeOnNextLock = false
     @Published var policy: RecoveryPolicy
     private var timer: Timer?
+    private var connectionEvents: ConnectionEvents?
+    private var eventTask: Task<Void, Never>?
+    private var pendingConnectionEvent: String?
     private var checking = false
     private var pendingProfileReconciled = false
     private var lastProfileReconcile = Date.distantPast
@@ -275,13 +278,14 @@ final class GuardEngine: ObservableObject {
     private var episodeID: String?
     private var activeAttempt: LoginAttribution?
     private var sessionObservers: [NSObjectProtocol] = []
-    private var scheduledRecoveryActive = false
+    private var recoveryWindowActive = false
     private var lastGatewayProbe = Date.distantPast
     private var gatewayReachable = false
     private var disconnectionWindow = DisconnectionWindow()
     private var lastAttemptEnd: Date?
     private var lastWidgetReload = Date.distantPast
     private var lastPublishedState = ""
+    private var lastPublishedNextCheckAt: Date?
     private var lastLogCheck = Date.distantPast
     private var lastReconnectScan = Date.distantPast
     private var lastPublishedReconnectCount: Int?
@@ -314,16 +318,69 @@ final class GuardEngine: ObservableObject {
     }
 
     func start() {
+        connectionEvents = ConnectionEvents { [weak self] reason in
+            Task { @MainActor in self?.connectionEvent(reason) }
+        }
+        snapshot.connectionEventsReady = connectionEvents?.start() == true
         for name in [NSWorkspace.didWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
             sessionObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in
                     self?.otpClock = OfflineOTP.Clock()
-                    self?.armScheduledEvaluation()
-                    self?.publish()
+                    self?.connectionEvent("session_resumed")
                 }
             })
         }
-        Task { await check() }
+        sessionObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didDeactivateApplicationNotification, object: nil, queue: .main) { [weak self] notification in
+            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.bundleIdentifier == "com.arraynetworks.motionpro" else { return }
+            Task { @MainActor in
+                guard self?.snapshot.waitReason == "user_foreground_client" else { return }
+                self?.connectionEvent("client_operation_finished")
+            }
+        })
+        Task { await observeConnectionEvent(reason: "startup") }
+    }
+
+    private func connectionEvent(_ reason: String) {
+        guard policy.enabled, !policy.manualHold, !busy else { return }
+        pendingConnectionEvent = reason
+        schedulePendingConnectionEvent()
+    }
+
+    private func schedulePendingConnectionEvent() {
+        guard policy.enabled, !policy.manualHold, !busy, !checking, !recoveryWindowActive,
+              pendingConnectionEvent != nil, eventTask == nil else { return }
+        eventTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+            guard let self else { return }
+            self.eventTask = nil
+            guard !self.checking, !self.busy, !self.recoveryWindowActive,
+                  let reason = self.pendingConnectionEvent else { return }
+            self.pendingConnectionEvent = nil
+            await self.observeConnectionEvent(reason: reason)
+        }
+    }
+
+    /// Event bursts share one bounded window and the existing submission budget.
+    private func observeConnectionEvent(reason: String) async {
+        guard !recoveryWindowActive, !checking, !busy else { return }
+        recoveryWindowActive = true; timer?.invalidate(); timer = nil
+        record("connection_event_evaluation_started", reason: reason)
+        defer {
+            recoveryWindowActive = false
+            armScheduledEvaluation(); publish(); schedulePendingConnectionEvent()
+        }
+        await observeUntilSettled()
+    }
+
+    private func observeUntilSettled() async {
+        let window = ConnectionObservationWindow(startedAt: ProcessInfo.processInfo.systemUptime)
+        repeat {
+            await check()
+            guard window.shouldContinue(state: snapshot.state, reason: snapshot.waitReason ?? "",
+                                        uptime: ProcessInfo.processInfo.systemUptime) else { return }
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+        } while ProcessInfo.processInfo.systemUptime < window.deadline
     }
 
     private func armScheduledEvaluation() {
@@ -331,7 +388,7 @@ final class GuardEngine: ObservableObject {
         snapshot.automaticCheckMode = LoginExpirySchedule.mode
         snapshot.lastSuccessfulLoginAt = policy.lastSuccessfulLoginAt
         snapshot.nextCheckAt = nil
-        guard !scheduledRecoveryActive, !busy, policy.enabled, !policy.manualHold,
+        guard !recoveryWindowActive, !busy, policy.enabled, !policy.manualHold,
               policy.consecutiveFailures < 2,
               var next = LoginExpirySchedule.next(lastLogin: policy.lastSuccessfulLoginAt,
                                                    evaluatedAt: policy.lastScheduledEvaluationAt) else { return }
@@ -350,10 +407,10 @@ final class GuardEngine: ObservableObject {
         savePolicy(); record("login_time_recorded")
     }
 
-    /// Only the expected-expiry event opens this bounded observation window.
-    /// There is no status polling between scheduled events.
+    /// Expected expiry provides a fallback to native connection notifications.
+    /// Each trigger opens a bounded window; idle monitoring does not poll status.
     private func scheduledEvaluation() async {
-        guard !scheduledRecoveryActive, !checking, !busy else { return }
+        guard !recoveryWindowActive, !checking, !busy else { return }
         guard policy.enabled, !policy.manualHold else { armScheduledEvaluation(); publish(); return }
         if let until = policy.manualControlUntil, until > Date() {
             armScheduledEvaluation(); publish(); return
@@ -362,22 +419,14 @@ final class GuardEngine: ObservableObject {
                                                   evaluatedAt: policy.lastScheduledEvaluationAt), due <= Date() else {
             armScheduledEvaluation(); publish(); return
         }
-        scheduledRecoveryActive = true; timer?.invalidate(); timer = nil
+        recoveryWindowActive = true; timer?.invalidate(); timer = nil
         policy.lastScheduledEvaluationAt = Date(); savePolicy()
         record("scheduled_expiry_evaluation_started")
         defer {
-            scheduledRecoveryActive = false
-            armScheduledEvaluation(); publish()
+            recoveryWindowActive = false
+            armScheduledEvaluation(); publish(); schedulePendingConnectionEvent()
         }
-        // Confirm a real disconnect for 30 seconds, or let an existing vendor
-        // transition finish. Authentication itself retains its own 180s bound.
-        let deadline = ProcessInfo.processInfo.systemUptime + 180
-        repeat {
-            await check()
-            guard ["disconnected", "connecting"].contains(snapshot.state),
-                  ProcessInfo.processInfo.systemUptime < deadline else { return }
-            try? await Task.sleep(nanoseconds: 10_000_000_000)
-        } while ProcessInfo.processInfo.systemUptime < deadline
+        await observeUntilSettled()
     }
 
     func takeManualControl() {
@@ -389,17 +438,17 @@ final class GuardEngine: ObservableObject {
 
     func resumeControl() {
         policy.manualControlUntil = nil; snapshot.manualControlUntil = nil
-        savePolicy(); record("manual_control_released", initiator: "user"); publish(); Task { await check() }
+        savePolicy(); record("manual_control_released", initiator: "user"); publish(); Task { await observeConnectionEvent(reason: "manual_control_released") }
     }
 
     func savePolicy() {
         do { try RecoveryPolicyDisk.write(policy) }
         catch { policy.manualHold = true; policy.enabled = false; setupMessage = HeadlessFailure.persistence.localizedDescription }
     }
-    func setEnabled(_ enabled: Bool) { policy.enabled = enabled; savePolicy(); Task { await check() } }
+    func setEnabled(_ enabled: Bool) { policy.enabled = enabled; savePolicy(); Task { await observeConnectionEvent(reason: "recovery_setting_changed") } }
     func releaseHold() {
         // A user can clear the failure hold, but not the two-submission rolling-hour budget.
-        policy.manualHold = false; policy.consecutiveFailures = 0; savePolicy(); Task { await check() }
+        policy.manualHold = false; policy.consecutiveFailures = 0; savePolicy(); Task { await observeConnectionEvent(reason: "failure_hold_released") }
     }
 
     func configureOfficialSource() async {
@@ -639,7 +688,7 @@ final class GuardEngine: ObservableObject {
         snapshot.lastCheckStartedAt = Date()
         defer {
             checking = false; snapshot.lastCheckCompletedAt = Date()
-            armScheduledEvaluation(); publish()
+            armScheduledEvaluation(); publish(); schedulePendingConnectionEvent()
         }
         let now = Date(); policy.prune(now: now)
         snapshot.recoveryBackend = policy.recoveryBackend ?? OfficialProfile.backend
@@ -719,7 +768,7 @@ final class GuardEngine: ObservableObject {
             if !policy.enabled { detail = "校园网已连接 · 自动恢复已暂停" }
             else if policy.manualHold { detail = "连接正常 · 失败保护已暂停自动登录" }
             else if snapshot.recoveryBackend == OfficialProfile.backend {
-                detail = snapshot.credentialReady ? "按成功登录时间安排恢复 · 不轮询连接" : "连接正常 · 自动恢复配置待检查"
+                detail = snapshot.credentialReady ? (snapshot.connectionEventsReady == true ? "断线事件触发自动恢复 · 到期检查补充" : "断线监听不可用 · 保留到期检查") : "连接正常 · 自动恢复配置待检查"
             }
             else if snapshot.recoveryBackend == "headless_native" { detail = "连接正常 · 已启用无窗口恢复流程" }
             else if snapshot.credentialCheckState == nil { detail = "连接正常 · 断线时检查凭据与 OTP" }
@@ -731,12 +780,12 @@ final class GuardEngine: ObservableObject {
         }
         snapshot.connectedSince = nil
         if status.isBusy { set("connecting", "正在连接", "等待 MotionPro 完成当前操作"); return }
-        guard status.mayLogin else { set("unknown", "等待客户端", "当前模式不是校园网隧道连接"); return }
+        guard status.mayLogin else { set("unknown", "等待客户端", "当前模式不是校园网隧道连接", reason: "vendor_mode_not_tunnel"); return }
         if persistentlyDisconnected && episodeID == nil {
             episodeID = UUID().uuidString; snapshot.episodeID = episodeID
             record("persistent_disconnect_confirmed", status: status)
         }
-        guard policy.enabled else { set("paused", "自动恢复已暂停", "开启后按成功登录时间安排恢复"); return }
+        guard policy.enabled else { set("paused", "自动恢复已暂停", "开启后监听断线并自动恢复"); return }
         if let until = policy.manualControlUntil, until > now {
             set("waiting", "手动接管中", "接管期内不提交登录；到期后按计划恢复", reason: "manual_control"); return
         }
@@ -791,6 +840,9 @@ final class GuardEngine: ObservableObject {
             set("otp", "动态口令暂不可读", error.localizedDescription)
             return
         }
+        // This confirmed disconnection consumes earlier signals. Events emitted
+        // by the login itself must not queue another authentication attempt.
+        pendingConnectionEvent = nil
         checking = false
         if snapshot.recoveryBackend == OfficialProfile.backend { await recoverOfficial() }
         else if snapshot.recoveryBackend == "headless_native" { await recoverHeadless() }
@@ -853,10 +905,12 @@ final class GuardEngine: ObservableObject {
             try? data.write(to: container.appendingPathComponent("status.json"), options: .atomic)
         }
         let count = snapshot.reconnectionCount(at: snapshot.updatedAt)
-        let changed = lastPublishedState != snapshot.state || lastPublishedReconnectCount != count
+        let changed = lastPublishedState != snapshot.state || lastPublishedReconnectCount != count ||
+            lastPublishedNextCheckAt != snapshot.nextCheckAt
         if changed || Date().timeIntervalSince(lastWidgetReload) > 300 {
             WidgetCenter.shared.reloadTimelines(ofKind: GuardIdentity.widgetKind)
             lastWidgetReload = Date(); lastPublishedState = snapshot.state; lastPublishedReconnectCount = count
+            lastPublishedNextCheckAt = snapshot.nextCheckAt
         }
     }
 

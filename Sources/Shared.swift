@@ -73,7 +73,17 @@ struct GuardSnapshot: Codable {
     var headlessAcceptanceState: String?
     var lastCLIRequestID: String?
     var automaticCheckMode: String?
+    var connectionEventsReady: Bool?
     var lastSuccessfulLoginAt: Date?
+    var widgetHasBlockingIssue: Bool { state == "attention" || state == "held" }
+    func widgetTitle(at date: Date) -> String {
+        if widgetHasBlockingIssue { return title }
+        if connectionEventsReady == true && recoveryEnabled && state == "connected" { return "断线自恢复" }
+        if automaticCheckMode == LoginExpirySchedule.mode && (nextCheckAt ?? .distantPast) > date {
+            return "定时恢复"
+        }
+        return date.timeIntervalSince(updatedAt) > 180 ? "等待更新" : title
+    }
     static var placeholder: Self { Self() }
     var otpAccessReady: Bool {
         if offlineOTPCheckState != nil && offlineOTPCheckState != "missing" { return offlineOTPReady == true }
@@ -166,6 +176,7 @@ struct RecoveryPolicy: Codable {
     var recoveryBackend: String?
     var lastSuccessfulLoginAt: Date?
     var lastScheduledEvaluationAt: Date?
+    var oneTimeHourlyLimitOverrideUntil: Date?
 
     static func loadOrHold(_ data: Data, now: Date = Date()) -> Self {
         if let saved = try? JSONDecoder().decode(Self.self, from: data),
@@ -179,13 +190,16 @@ struct RecoveryPolicy: Codable {
 
     mutating func prune(now: Date) { submissions.removeAll { now.timeIntervalSince($0) >= 3600 } }
     func allowed(now: Date) -> Bool {
-        enabled && !manualHold && (manualControlUntil == nil || manualControlUntil! <= now)
-            && consecutiveFailures < 2 && submissions.filter { now.timeIntervalSince($0) < 3600 }.count < 2
+        let hourlyAvailable = submissions.filter { now.timeIntervalSince($0) < 3600 }.count < 2
+            || (oneTimeHourlyLimitOverrideUntil.map { $0 > now } ?? false)
+        return enabled && !manualHold && (manualControlUntil == nil || manualControlUntil! <= now)
+            && consecutiveFailures < 2 && hourlyAvailable
     }
     mutating func submit(now: Date) throws {
         prune(now: now)
         guard allowed(now: now) else { throw GuardFailure.retryLimit }
         submissions.append(now)
+        oneTimeHourlyLimitOverrideUntil = nil
     }
     mutating func failed() { consecutiveFailures += 1; if consecutiveFailures >= 2 { manualHold = true } }
     mutating func succeeded(now: Date) {

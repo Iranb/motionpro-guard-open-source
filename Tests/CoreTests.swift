@@ -165,6 +165,25 @@ import Security
         check(!restored.allowed(now: now.addingTimeInterval(120)), "restart preserves retry budget")
         policy.manualHold = false; policy.consecutiveFailures = 0
         check(!policy.allowed(now: now.addingTimeInterval(200)), "manual release does not erase hourly limit")
+        var granted = policy
+        granted.oneTimeHourlyLimitOverrideUntil = now.addingTimeInterval(600)
+        check(granted.allowed(now: now.addingTimeInterval(200)), "explicit test grant permits one additional submission")
+        let priorSubmissions = granted.submissions
+        try granted.submit(now: now.addingTimeInterval(200))
+        check(granted.submissions == priorSubmissions + [now.addingTimeInterval(200)], "test grant preserves all prior submission records")
+        check(granted.oneTimeHourlyLimitOverrideUntil == nil, "a submission consumes the test grant")
+        check(!granted.allowed(now: now.addingTimeInterval(201)), "the grant cannot authorize a fourth submission")
+        let consumedGrant = try JSONDecoder().decode(RecoveryPolicy.self, from: JSONEncoder().encode(granted))
+        check(!consumedGrant.allowed(now: now.addingTimeInterval(202)), "restart does not renew the consumed grant")
+        var expiredGrant = policy
+        expiredGrant.oneTimeHourlyLimitOverrideUntil = now.addingTimeInterval(200)
+        check(!expiredGrant.allowed(now: now.addingTimeInterval(200)), "an expired test grant does not bypass the hourly limit")
+        var heldGrant = policy
+        heldGrant.oneTimeHourlyLimitOverrideUntil = now.addingTimeInterval(600)
+        heldGrant.failed(); heldGrant.failed()
+        check(!heldGrant.allowed(now: now.addingTimeInterval(200)), "test grants retain consecutive-failure protection")
+        heldGrant.manualHold = false
+        check(!heldGrant.allowed(now: now.addingTimeInterval(200)), "test grants do not bypass the failure count")
         policy.prune(now: now.addingTimeInterval(4000))
         check(policy.allowed(now: now.addingTimeInterval(4000)), "hourly budget expires")
         let statsNow = Date(timeIntervalSince1970: 1_800_000_000)

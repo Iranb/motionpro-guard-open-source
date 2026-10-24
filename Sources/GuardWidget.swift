@@ -31,10 +31,10 @@ struct GuardWidgetView: View {
     let entry: GuardEntry
     @Environment(\.widgetFamily) var family
     var s: GuardSnapshot { entry.snapshot }
-    var color: Color { s.state == "connected" ? .green : (s.state == "recovering" ? .blue : .secondary) }
-    var scheduled: Bool { s.automaticCheckMode == LoginExpirySchedule.mode && (s.nextCheckAt ?? .distantPast) > entry.date }
-    var stale: Bool { !scheduled && entry.date.timeIntervalSince(s.updatedAt) > 180 }
-    var title: String { scheduled ? "定时恢复" : (stale ? "等待更新" : s.title) }
+    var color: Color { s.widgetHasBlockingIssue ? .orange : (s.state == "connected" ? .green : (s.state == "recovering" ? .blue : .secondary)) }
+    var scheduled: Bool { !s.widgetHasBlockingIssue && s.automaticCheckMode == LoginExpirySchedule.mode && (s.nextCheckAt ?? .distantPast) > entry.date }
+    var stale: Bool { !s.widgetHasBlockingIssue && !scheduled && entry.date.timeIntervalSince(s.updatedAt) > 180 }
+    var title: String { s.widgetTitle(at: entry.date) }
     var reconnectCount: String { s.reconnectionCount(at: entry.date).map(String.init) ?? "—" }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -74,7 +74,7 @@ struct GuardWidgetView: View {
         .containerBackground(for: .widget) { Color(.windowBackgroundColor) }
         .widgetURL(URL(string: "motionpro-guard-oss://open"))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("MotionPro，\(stale ? "等待更新" : s.title)，最近 72 小时成功重连 \(reconnectCount) 次")
+        .accessibilityLabel("MotionPro，\(title)，最近 72 小时成功重连 \(reconnectCount) 次")
     }
 }
 

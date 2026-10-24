@@ -41,7 +41,7 @@ python3 "SKILL_ROOT/scripts/handover.py" inspect
 读取 [自动流程与 OTP 同步](references/automatic-flow.md)，结合本轮状态判断：
 
 - 核对心跳、`lastProgressAt`、`recoveryBusy`、`profileMutationActive`、`stateDeadline`、策略开关和暂停预算。
-- `automaticCheckMode=login_expiry` 时，按成功登录后 24 小时加 2 分钟触发，平时不轮询。`scheduled_idle=true` 不代表卡住，也不代表隧道仍在线；不要擅自恢复周期查询。
+- Guard 1.6.5 通过原生日志/网络事件触发检查；`automaticCheckMode=login_expiry` 表示成功登录后 24 小时加 2 分钟的补充检查，平时不轮询。`scheduled_idle=true` 不代表卡住，也不代表隧道仍在线；不要擅自恢复周期查询。
 - 按阶段等待：持续断线确认约 30 秒；默认 `official_profile` 等待安全 OTP 窗口，提交后观察隧道最多 180 秒；前置检查另计。
 - 有进度且未过本阶段截止时间时继续观察。陈旧状态、阶段超时、钥匙串/绑定失败或预算暂停须说明具体阻塞。
 - 默认 `official_profile` 使用官方已保存密码和每次新读取的官方令牌，不依赖旧 Guard 钥匙串或口令窗口。旧后端仅在条目不存在时允许窗口备用；拒绝访问或绑定不匹配不能悄悄换来源。

@@ -15,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 BUNDLE = "org.motionproguard.app"
 APP_NAME = "MotionPro Guard OSS"
-VERSION = "1.6.1"
+VERSION = "1.6.5"
 
 
 def configuration(path):
@@ -87,11 +87,12 @@ def main():
                 "-module-cache-path", str(stage / "module-cache")]
         common = [str(stage / "Sources" / name) for name in
                   ("BuildConfiguration.swift", "Shared.swift", "Credentials.swift",
-                   "RecoveryFlow.swift", "OfflineOTP.swift", "Reliability.swift", "OfficialProfile.swift")]
+                   "RecoveryFlow.swift", "OfflineOTP.swift", "Reliability.swift", "OfficialProfile.swift", "ConnectionEvents.swift")]
         headless = [str(stage / "Sources" / name) for name in
                     ("HeadlessGateway.swift", "NativeTunnel.swift", "HeadlessRecovery.swift")]
         for suite, dependencies in (("CoreTests", common), ("HeadlessTests", common + headless),
-                                    ("OfficialProfileTests", common), ("LoginScheduleTests", common)):
+                                    ("OfficialProfileTests", common), ("LoginScheduleTests", common),
+                                    ("ConnectionEventTests", common)):
             run(base + dependencies + [str(stage / "Tests" / (suite + ".swift")), "-o", str(stage / suite)])
             run([str(stage / suite)])
         if args.test_only:
@@ -108,7 +109,7 @@ def main():
             str(stage / "Sources/BuildConfiguration.swift"), str(stage / "Sources/Shared.swift"),
             str(stage / "Sources/GuardWidget.swift"), "-o", str(ext / "Contents/MacOS/MotionProGuardWidget")])
         info = {"CFBundleInfoDictionaryVersion": "6.0", "CFBundleShortVersionString": VERSION,
-                "CFBundleVersion": "18", "CFBundleDevelopmentRegion": "zh_CN",
+                "CFBundleVersion": "22", "CFBundleDevelopmentRegion": "zh_CN",
                 "LSMinimumSystemVersion": "14.0", "CFBundleSupportedPlatforms": ["MacOSX"]}
         write_plist(app / "Contents/Info.plist", dict(info, CFBundleIdentifier=BUNDLE,
             CFBundleName=APP_NAME, CFBundleDisplayName=APP_NAME, CFBundleExecutable="MotionProGuard",

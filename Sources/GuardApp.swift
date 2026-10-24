@@ -102,7 +102,7 @@ struct ControlView: View {
                     .font(.system(size: 12, weight: .medium)).foregroundStyle(engine.snapshot.tint)
             }
             Text(engine.snapshot.detail).font(.system(size: 12)).foregroundStyle(.secondary)
-            Toggle("预计到期后自动恢复", isOn: Binding(get: { engine.policy.enabled }, set: { engine.setEnabled($0) }))
+            Toggle("断线后自动恢复", isOn: Binding(get: { engine.policy.enabled }, set: { engine.setEnabled($0) }))
                 .toggleStyle(.switch).disabled(engine.busy)
             Divider()
             if let login = engine.policy.lastSuccessfulLoginAt {
@@ -110,7 +110,7 @@ struct ControlView: View {
                     .font(.system(size: 12)).foregroundStyle(.secondary)
             }
             if let next = engine.snapshot.nextCheckAt {
-                Text("下次恢复时间：\(next.formatted(date: .numeric, time: .standard))")
+                Text("到期补充检查：\(next.formatted(date: .numeric, time: .standard))")
                     .font(.system(size: 12)).foregroundStyle(.secondary)
             }
             VStack(alignment: .leading, spacing: 15) {
@@ -160,7 +160,7 @@ struct ControlView: View {
                 }
                 if engine.policy.manualHold { Button("已检查，恢复尝试") { engine.releaseHold() }.disabled(engine.busy) }
             }
-            Text("按成功登录后 24 小时加 2 分钟安排恢复，平时不轮询 VPN。到期确认断开后才登录；仍连接则保留，并安排下一天。提前意外断线需手动点击检查。电脑休眠时等待唤醒；每小时最多提交两次。")
+            Text("监听 MotionPro 日志与系统网络变化，持续断线约 30 秒后自动恢复；正常连接时只等待事件。成功登录后 24 小时加 2 分钟另做补充检查。手动断开前请暂停恢复或接管；电脑休眠时等待唤醒。每小时最多两次提交，连续两次失败暂停。")
                 .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Spacer()

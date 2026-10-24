@@ -71,7 +71,7 @@ def snapshot_summary(path, now):
         out["fresh"] = -5 <= age <= 180
     state = value.get("state")
     out["state"] = state if isinstance(state, str) and state in GUARD_STATES else "unknown"
-    for key in ("recoveryEnabled", "credentialReady", "otpReady", "accessibilityReady", "offlineOTPReady", "backgroundOTPVerifiedWhileLocked", "recoveryBusy", "profileMutationActive"):
+    for key in ("recoveryEnabled", "credentialReady", "otpReady", "accessibilityReady", "offlineOTPReady", "backgroundOTPVerifiedWhileLocked", "recoveryBusy", "profileMutationActive", "connectionEventsReady"):
         out[key] = value[key] if type(value.get(key)) is bool else None
     credential_state = value.get("credentialCheckState")
     out["credentialCheckState"] = (credential_state if credential_state in
@@ -98,7 +98,7 @@ def snapshot_summary(path, now):
     for key in ("processGeneration", "episodeID", "attemptID"):
         if isinstance(value.get(key), str) and re.fullmatch(r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}", value[key]):
             out[key] = value[key]
-    reasons = {"startup", "state_changed", "tunnel_connected", "vendor_transition", "vendor_state_unknown",
+    reasons = {"startup", "state_changed", "tunnel_connected", "vendor_transition", "vendor_state_unknown", "vendor_mode_not_tunnel",
                "recovery_disabled", "permission_unavailable", "credential_missing", "network_unavailable",
                "authentication_budget_or_hold", "confirming_disconnect", "recovery_wait", "otp_unavailable",
                "authentication_in_progress", "manual_control", "network_path_unavailable",

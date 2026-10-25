@@ -84,4 +84,11 @@ The reusable Codex skill is in [skills/motionpro-vpn-access](skills/motionpro-vp
 - Configuration encryption and decryption support only the two verified client builds identified in the source. Guard stops on a mismatch. Vendor keys and binaries are not included. See [Compatibility](docs/compatibility.md) (Chinese).
 - **A 1.6.5 candidate passed one event-driven reconnect on a separate test Mac after a manually induced disconnection.** The same Guard process detected the network event, submitted one official-client login while locked, confirmed attribution, and restored the tunnel. Independent observations then showed at least 60 seconds of stable connection, with a maximum sampling gap of about 12 seconds. The one-time test grant was consumed and prior history was preserved.
 - That test used local configuration and signing. Authentication on a fresh public-edition installation and recovery after a naturally expired 24-hour session remain unverified. One successful recovery does not establish long-term reliability. See [Acceptance criteria](docs/acceptance.md).
-- Guard runs in a logged-in macOS session. It does not recover while the Mac is asleep, shut down, or logged out; waking requests a new check. Listener readiness mea
+- Guard runs in a logged-in macOS session. It does not recover while the Mac is asleep, shut down, or logged out; waking requests a new check. Listener readiness means at least one notification source started, not that every notification source works on every machine.
+- If logs cannot provide a trustworthy successful-login time, Guard does not invent an expiry anchor. Native events can still trigger checks. Restoring the VPN tunnel does not restore SSH/HPC sessions or application authentication; those require separate verification.
+
+## Distribution
+
+This repository includes source code, synthetic tests, build and installation tools, sanitized diagnostics, and migration documentation. It excludes account credentials, OTP seeds and codes, official client configurations, Keychains, personal paths, certificate fingerprints, real logs, runtime state, and recovery backups.
+
+[Changelog](CHANGELOG.md) · [Security](SECURITY.md) (Chinese)

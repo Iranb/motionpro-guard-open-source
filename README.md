@@ -2,6 +2,8 @@
 
 An automatic recovery helper for MotionPro VPN on macOS, with a background app and a native desktop widget. **Current version: 1.6.5.** Guard listens for MotionPro log events and system network changes. It confirms a disconnection for about 30 seconds before reconnecting. Idle monitoring does not poll VPN status at a fixed interval.
 
+**Prerequisite: install both official MotionPro and MotionProOTP on the same Mac that runs Guard, and complete their local login and setup before enabling automatic recovery.** MotionPro must have a saved static password, and MotionProOTP must have a locally bound token for the intended VPN account. Setup on another computer or phone does not provide this Mac's saved password or token binding.
+
 Guard uses the static password saved by the official MotionPro client. For each login, it reads the current local MotionProOTP binding and calculates a one-time password (OTP). The default flow does not require the OTP window, an old copy of credentials in Guard's Keychain, or a model API.
 
 **License: GNU GPL v3 or later (GPL-3.0-or-later).** See [LICENSE](LICENSE) for the full text. This is an independent community tool distributed as source code. MotionPro, MotionProOTP, and vendor libraries belong to their respective rights holders and are not included in this repository or its source archives.
@@ -34,9 +36,12 @@ See [Architecture](docs/architecture.md) and [Acceptance criteria](docs/acceptan
 
 ## Build and install
 
-Requirements: macOS 14 or later, Xcode Command Line Tools, Python 3, and your own legally installed and configured copies of MotionPro and MotionProOTP. The app UI is currently in Chinese; exact button labels are included below.
+Requirements: macOS 14 or later, Xcode Command Line Tools, Python 3, and your own legally installed copies of both official macOS apps, MotionPro and MotionProOTP, on this Mac. The app UI is currently in Chinese; exact button labels are included below.
 
-1. Log in manually once with the official client, save the static password, and set the target VPN as the default site. Bind an OTP token separately on each computer.
+1. Complete the initial setup in both official apps on this Mac:
+   - **MotionPro:** log in successfully once, save the static password, and set the target VPN as the default site.
+   - **MotionProOTP:** sign in with the intended VPN account and complete token binding on this Mac. Repeat this setup separately on each Mac where Guard will run.
+   - After setup, Guard uses the saved password and local token binding for recovery. You do not need to keep the OTP window open or manually enter credentials for each recovery.
 2. Copy [project.example.json](project.example.json) to `project.local.json`. Set your gateway hostname without adding an account name or secrets.
 3. Build and install with your own persistent code-signing identity:
 
@@ -79,11 +84,4 @@ The reusable Codex skill is in [skills/motionpro-vpn-access](skills/motionpro-vp
 - Configuration encryption and decryption support only the two verified client builds identified in the source. Guard stops on a mismatch. Vendor keys and binaries are not included. See [Compatibility](docs/compatibility.md) (Chinese).
 - **A 1.6.5 candidate passed one event-driven reconnect on a separate test Mac after a manually induced disconnection.** The same Guard process detected the network event, submitted one official-client login while locked, confirmed attribution, and restored the tunnel. Independent observations then showed at least 60 seconds of stable connection, with a maximum sampling gap of about 12 seconds. The one-time test grant was consumed and prior history was preserved.
 - That test used local configuration and signing. Authentication on a fresh public-edition installation and recovery after a naturally expired 24-hour session remain unverified. One successful recovery does not establish long-term reliability. See [Acceptance criteria](docs/acceptance.md).
-- Guard runs in a logged-in macOS session. It does not recover while the Mac is asleep, shut down, or logged out; waking requests a new check. Listener readiness means at least one notification source started, not that every notification source works on every machine.
-- If logs cannot provide a trustworthy successful-login time, Guard does not invent an expiry anchor. Native events can still trigger checks. Restoring the VPN tunnel does not restore SSH/HPC sessions or application authentication; those require separate verification.
-
-## Distribution
-
-This repository includes source code, synthetic tests, build and installation tools, sanitized diagnostics, and migration documentation. It excludes account credentials, OTP seeds and codes, official client configurations, Keychains, personal paths, certificate fingerprints, real logs, runtime state, and recovery backups.
-
-[Changelog](CHANGELOG.md) · [Security](SECURITY.md) (Chinese)
+- Guard runs in a logged-in macOS session. It does not recover while the Mac is asleep, shut down, or logged out; waking requests a new check. Listener readiness mea
